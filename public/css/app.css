@@ -73,6 +73,23 @@ textarea {
   height: 100dvh;
 }
 
+/* Pin every region to its row. The banner is `hidden` most of the time, and a
+   display:none child takes no grid cell — without these the workspace slid up
+   into the banner's auto-sized row and the dock took the 1fr row, so the whole
+   editor shrank to the height of whatever the side panel happened to show. */
+.topbar {
+  grid-row: 1;
+}
+.banner {
+  grid-row: 2;
+}
+.workspace {
+  grid-row: 3;
+}
+.dock {
+  grid-row: 4;
+}
+
 /* ── Topbar ─────────────────────────────────────────────────────────────── */
 
 .topbar {

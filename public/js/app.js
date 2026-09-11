@@ -43,7 +43,8 @@ const state = {
   config: null,
   mode: "demo",
   doc: new SpeakdownDoc(),
-  client: null,
+  client: null, // LiveDictation, or null in Demo Mode
+  demo: null, // DemoDictation — the scripted walkthrough, playable in either mode
   recorder: null,
   running: false,
   demoRunning: false,
@@ -111,7 +112,8 @@ async function init() {
   }
 
   state.mode = state.config.mode === "live" ? "live" : "demo";
-  state.client = state.mode === "live" ? new LiveDictation() : new DemoDictation();
+  state.client = state.mode === "live" ? new LiveDictation() : null;
+  state.demo = new DemoDictation(); // available in both modes — Play demo always works
 
   populateLanguages();
   applyModeChrome();
@@ -152,7 +154,10 @@ function applyModeChrome() {
       ? "No API key configured — replaying a scripted document"
       : "Invite-only instance — replaying a scripted document";
 
-  el.btnDemo.hidden = live;
+  el.btnDemo.hidden = false;
+  el.btnDemo.title = live
+    ? "Watch the scripted walkthrough — your microphone stays off"
+    : "Replay a scripted dictation with realistic timings";
   el.metaEndpoint.textContent = state.config?.endpoint || "dictation.assemblyai.com/v1/transcribe/live";
   el.metaKeyterms.textContent = `${KEYTERMS.length} phrases, every request`;
   updateMetaFromSettings();
@@ -424,6 +429,7 @@ async function toggleDictation() {
     toast("Demo Mode — add an API key for live dictation", "!", "error");
     return;
   }
+  if (state.demoRunning) stopDemo();
   return state.running ? stopDictation() : startDictation();
 }
 
@@ -918,6 +924,15 @@ async function toggleDemo() {
 
 async function runDemo() {
   if (state.editingSource) toggleSourceEditing();
+  if (state.running) await stopDictation();
+
+  // In live mode the demo is a walkthrough, not part of your document. Starting
+  // it fresh over real dictation needs a nod first.
+  const fresh = state.demo.remaining === DEMO_SCRIPT.length;
+  if (state.mode === "live" && fresh && !state.doc.isEmpty()) {
+    if (!confirm("Clear the current document and play the demo?")) return;
+    resetSession();
+  }
 
   state.demoRunning = true;
   state.demoAbort = false;
@@ -925,13 +940,13 @@ async function runDemo() {
   el.btnMic.classList.add("is-listening");
   state.meterMood = "listening";
 
-  if (state.client.remaining === 0) resetSession();
+  if (state.demo.remaining === 0) resetSession();
 
-  while (state.demoRunning && !state.demoAbort && state.client.remaining > 0) {
-    const entry = DEMO_SCRIPT[DEMO_SCRIPT.length - state.client.remaining];
+  while (state.demoRunning && !state.demoAbort && state.demo.remaining > 0) {
+    const entry = DEMO_SCRIPT[DEMO_SCRIPT.length - state.demo.remaining];
     const speakMs = 700 + Math.min(1600, (entry?.text || "").length * 16);
 
-    const utterance = await state.client.startUtterance();
+    const utterance = await state.demo.startUtterance();
 
     el.btnMic.classList.remove("is-listening");
     el.btnMic.classList.add("is-speaking");
@@ -955,7 +970,7 @@ async function runDemo() {
     await sleep(240);
   }
 
-  if (state.client.remaining === 0 && !state.demoAbort) {
+  if (state.demo.remaining === 0 && !state.demoAbort) {
     toast("Demo complete — press Play to run it again", "✓");
   }
   stopDemo();
@@ -966,7 +981,7 @@ function stopDemo() {
   state.demoAbort = true;
   state.currentLevel = 0;
   state.meterMood = "idle";
-  el.btnDemo.textContent = state.client?.remaining === 0 ? "Replay demo" : "Play demo";
+  el.btnDemo.textContent = state.demo?.remaining === 0 ? "Replay demo" : "Play demo";
   el.btnMic.classList.remove("is-listening", "is-speaking");
   setStatus("Idle");
 }
@@ -1040,7 +1055,7 @@ function resetSession() {
   state.seq = 0;
   state.nextToApply = 0;
   state.pending.clear();
-  if (state.mode === "demo") state.client.reset();
+  state.demo?.reset();
   el.activity.innerHTML = "";
   el.activityEmpty.hidden = false;
   el.statWait.textContent = "—";
