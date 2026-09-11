@@ -12,6 +12,7 @@ live latency numbers, not Demo Mode.
 ## Before you hit record
 
 - Run `node server/index.js` and confirm the mode pill says **LIVE**.
+- Confirm *Upload* is set to "Stream while speaking" in Settings.
 - Dismiss the Demo Mode banner if it is showing.
 - Open the **Commands** tab in the right rail. It lights up as commands fire,
   which is the clearest visual proof that speech became structure.
@@ -25,8 +26,9 @@ live latency numbers, not Demo Mode.
 ## The take
 
 Speak at a normal pace and **pause about a second between utterances**. Each
-pause is what closes a clip and sends it. Watch the latency badge in the bottom
-right — it updates on every request, and that number is the star of the demo.
+pause is what closes a clip and finishes the upload. Watch "wait after speech" in
+the bottom right — it updates on every request, and that number is the star of
+the demo.
 
 > **Say:** "Title, Speakdown."
 >
@@ -39,7 +41,14 @@ right — it updates on every request, and that number is the star of the demo.
 >
 > *Point out, out loud, that the heading did not swallow the paragraph.*
 
-> **Say:** "Heading two, why it works."
+> **Say:** "Heading two, uploading while you speak."
+
+> **Say:** "The endpoint transcribes the audio it already has while the rest is
+> still arriving."
+>
+> *This is the moment to point at the dock. Say the "wait after speech" number
+> out loud, and say that the request opened when you started talking, not when
+> you stopped.*
 
 > **Say:** "Bullet list, every command phrase goes into keyterms prompt on every
 > request."
@@ -49,9 +58,9 @@ right — it updates on every request, and that number is the star of the demo.
 > *This one matters. It proves the parser does not fire on a command phrase used
 > mid-sentence. Say so.*
 
-> **Say:** "Next bullet, one HTTP round trip, no websocket, no polling."
+> **Say:** "Next bullet, one HTTP request, no websocket, no polling."
 
-> **Say:** "New paragraph. The whole thing runs on the AssemblyAI sync endpoint."
+> **Say:** "New paragraph. The whole thing runs on the AssemblyAI dictation endpoint."
 
 > **Say:** "Bold that."
 >
@@ -65,9 +74,20 @@ right — it updates on every request, and that number is the star of the demo.
 
 > **Say:** "Checklist, ship it."
 
-Then, with the mic still on, **switch the rail to the Activity tab** and let the
-viewer see the per-request round trips, server times and confidence scores
-stacked up. Say the median out loud.
+Now the two moments that separate this from every other entry.
+
+**One: the rewrite is visible.** Click **Verbatim** in the Markdown pane header.
+The disfluencies you actually said reappear — the "um" and the "you know" that
+the default cleanup removed. Click **Cleaned** and they vanish again. Then switch
+the rail to **Activity** and point at a `rewrite removed N words` diff: the
+struck-through words are exactly what `llm_response` dropped from `text`. Say
+that the API returns both, and that this is what makes the rewrite auditable
+rather than something you have to trust.
+
+**Two: streaming is measurable.** Open **Settings**, switch *Upload* from "Stream
+while speaking" to "Buffer, then send", and dictate one more sentence of similar
+length. Watch "wait after speech" climb. Switch it back and dictate again. That
+side-by-side is the strongest thirty seconds in the video — do not skip it.
 
 Finish by hovering one of the amber dotted underlines in the source pane so the
 "Low transcription confidence" tooltip shows.
@@ -78,14 +98,17 @@ Finish by hovering one of the amber dotted underlines in the source pane so the
 
 Keep the narration to three points. Everything else is visible.
 
-1. **The formatting is spoken, and the parser is deterministic.** No LLM in the
-   command loop, so a command behaves the same way every time.
-2. **`keyterms_prompt` is why it works.** Without the command vocabulary pushed
-   into every request, "heading two" comes back as "heading too" and the parser
-   never sees a command. That one parameter is the difference between a working
-   product and a party trick.
-3. **One request, one transcript.** Around 180 milliseconds, which is why it
-   feels like typing rather than like waiting for a transcription job.
+1. **It uploads while you talk.** The request opens when the voice-activity
+   detector hears you start, not when you stop. Transcription overlaps with the
+   rest of the sentence, so what you wait for at the end is only the tail. The
+   buffered toggle proves it on camera.
+2. **`keyterms_prompt` is why the commands land.** Without the command vocabulary
+   pushed into every request, "heading two" comes back as "heading too" and the
+   parser never sees a command. That one parameter is the difference between a
+   working product and a party trick.
+3. **The rewrite is auditable.** The API returns the verbatim transcript
+   alongside the cleaned one, so the editor can show you both and diff them
+   rather than asking you to trust a black box.
 
 ---
 
@@ -110,6 +133,7 @@ pressure. The only reason to restart is if the mic drops entirely.
 - [ ] Form: tick *Real-time dictation*, *Multi-language support*,
       *Filler-word removal*, *Custom vocabulary / other integration* — all four
       are genuinely used
-- [ ] Form: also submit the API feedback separately (the filler-removal and
-      language-count discrepancies, and the undocumented `/warm` endpoint) —
-      there is a $50 bounty for feedback and it is a real finding
+- [ ] Form: also submit the API feedback (discoverability vs the Sync product,
+      the buried "uploading while recording" section, the missing browser
+      HTTP/2 caveat, and the 18-vs-19 language count) — there is a $50 bounty
+      for feedback and these are real findings, in `docs/submission.md`

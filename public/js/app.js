@@ -1,24 +1,31 @@
 /**
  * Speakdown — application wiring.
  *
- * Flow for one utterance:
+ * Life of one utterance:
  *
- *   mic -> AudioWorklet frames -> VAD segments a clip -> WAV encode
- *       -> POST /api/transcribe -> AssemblyAI Sync endpoint
- *       -> strip fillers -> parse commands -> apply to document -> render
+ *   VAD detects speech onset
+ *     -> POST /api/dictate/start          (upstream request opens NOW)
+ *     -> PCM frames stream up every ~120 ms while the person is still talking
+ *   VAD detects ~700 ms of silence
+ *     -> POST /api/dictate/end            (body closes, transcript comes back)
+ *     -> pick cleaned or verbatim text
+ *     -> parse commands -> apply to document -> render
  *
- * Two details worth knowing before reading on:
+ * Three things here are less obvious than they look:
  *
- * Ordered concurrency. Requests fire as soon as a clip is ready, so speaking
- * three sentences in a row puts three requests in flight at once. But they are
- * *applied* strictly in the order they were spoken, via a sequence number and
- * a pending map. Without this, a fast short clip overtakes a slow long one and
- * your document comes out scrambled — the single most likely way a dictation
- * app built on a sync endpoint goes wrong.
+ * Audio can arrive before the session exists. `start` is a network round trip,
+ * short as it is, and the microphone does not wait for it. Frames captured in
+ * that window are buffered and flushed the moment the session id lands, rather
+ * than dropped — losing them would clip the first word of every utterance and
+ * undo the whole point of the pre-roll.
  *
- * One snapshot per utterance. "Scratch that" should undo the last thing you
- * said, not the last internal operation, so the document snapshots once per
- * utterance regardless of how many commands that utterance contained.
+ * Utterances overlap, so they are applied in spoken order. A sequence number
+ * and a pending map keep the document in the order the words were said, even
+ * when a short clip's transcript returns before a longer earlier one's.
+ *
+ * Every transcript is kept. The Cleaned/Verbatim toggle rebuilds the whole
+ * document by replaying the log through the same deterministic pipeline, so
+ * switching views is exact rather than an approximation applied after the fact.
  */
 
 import { Recorder, RecorderState } from "./recorder.js";
@@ -27,10 +34,8 @@ import { SpeakdownDoc } from "./doc.js";
 import { commandGroups, KEYTERMS } from "./commands.js";
 import { applyTranscript } from "./pipeline.js";
 import { wordCount } from "./text.js";
-import { renderMarkdown, highlightSource } from "./markdown.js";
+import { renderMarkdown, highlightSource, escapeHtml } from "./markdown.js";
 
-// ---------------------------------------------------------------------------
-// State
 // ---------------------------------------------------------------------------
 
 const el = {};
@@ -45,20 +50,33 @@ const state = {
   demoAbort: false,
   editingSource: false,
 
+  /** Every API response, in spoken order. The toggle replays these. */
+  transcripts: [],
+  textSource: "cleaned", // 'cleaned' | 'verbatim'
+
   settings: {
     language: "en",
-    fillerLevel: "standard",
+    uploadMode: "streaming",
     captureMode: "vad",
+    fillerLevel: "off",
+    llmInstruction: "",
     punctuation: false,
     heatmap: true,
     autoscroll: true,
   },
 
-  latencies: [],
+  waits: [],
+  streamedBytes: 0,
   levels: new Array(110).fill(0),
   threshold: 0.01,
   currentLevel: 0,
   meterMood: "idle",
+
+  // Current utterance
+  utterance: null,
+  utterancePromise: null,
+  pendingPcm: [],
+  activeSeq: -1,
 
   seq: 0,
   nextToApply: 0,
@@ -80,8 +98,7 @@ async function init() {
   restoreSettings();
 
   try {
-    const response = await fetch("/api/config");
-    state.config = await response.json();
+    state.config = await (await fetch("/api/config")).json();
   } catch {
     state.config = { mode: "demo", languages: [{ code: "en", label: "English" }] };
   }
@@ -99,15 +116,17 @@ function cacheElements() {
     "app", "workspace", "rail", "modePill", "modeLabel", "language",
     "btnCopy", "btnDownload", "btnClear", "btnRail", "banner", "bannerText",
     "bannerClose", "source", "sourceEdit", "emptyState", "preview", "docStats",
-    "commandList", "activity", "activityEmpty", "fillerLevel", "captureMode",
+    "commandList", "activity", "activityEmpty", "sourceToggle",
+    "uploadMode", "captureMode", "fillerLevel", "llmInstruction",
     "togglePunctuation", "toggleHeatmap", "toggleAutoscroll", "btnEditSource",
-    "metaEndpoint", "metaModel", "metaKeyterms", "metaContext",
+    "metaEndpoint", "metaAudio", "metaKeyterms", "metaLlm",
     "btnMic", "btnDemo", "meter", "status", "statusHint",
-    "statLatency", "statMedian", "statWords", "statFillers", "statCommands",
+    "statWait", "statMedian", "statStreamed", "statWords", "statCommands",
     "toasts",
   ];
   for (const id of ids) el[id] = document.getElementById(id);
   el.railTabs = [...document.querySelectorAll(".rail-tab")];
+  el.segButtons = [...el.sourceToggle.querySelectorAll(".seg")];
   el.meterCtx = el.meter.getContext("2d");
 }
 
@@ -117,28 +136,36 @@ function applyModeChrome() {
   el.modePill.classList.toggle("is-demo", !live);
   el.modeLabel.textContent = live ? "Live" : "Demo";
   el.modePill.title = live
-    ? "Connected to the AssemblyAI Sync endpoint"
+    ? "Connected to the AssemblyAI Dictation API"
     : "No API key configured — replaying a scripted document";
 
   el.btnDemo.hidden = live;
-  el.metaEndpoint.textContent = state.config?.endpoint || "sync.assemblyai.com/transcribe";
-  el.metaModel.textContent = state.config?.model || "universal-3-5-pro";
+  el.metaEndpoint.textContent = state.config?.endpoint || "dictation.assemblyai.com/v1/transcribe/live";
   el.metaKeyterms.textContent = `${KEYTERMS.length} phrases, every request`;
+  updateMetaFromSettings();
 
   if (!live) {
     showBanner(
       "Demo Mode — no API key set, so this replays a scripted document with simulated " +
-        "latencies. Add ASSEMBLYAI_API_KEY to .env and restart for real dictation.",
+        "timings. Add ASSEMBLYAI_API_KEY to .env and restart for real dictation.",
     );
     el.statusHint.textContent = "Press Play demo to watch it build a document";
   }
 }
 
+function updateMetaFromSettings() {
+  const streaming = state.settings.uploadMode === "streaming";
+  el.metaAudio.textContent = streaming
+    ? "16 kHz mono PCM, streamed while speaking"
+    : "16 kHz mono WAV, sent after speaking";
+  el.metaLlm.textContent = state.settings.llmInstruction.trim()
+    ? "custom — replaces default cleanup"
+    : "omitted — default cleanup";
+}
+
 function populateLanguages() {
   const languages = state.config?.languages || [{ code: "en", label: "English" }];
-  el.language.innerHTML = languages
-    .map((l) => `<option value="${l.code}">${l.label}</option>`)
-    .join("");
+  el.language.innerHTML = languages.map((l) => `<option value="${l.code}">${l.label}</option>`).join("");
   el.language.value = state.settings.language;
   if (el.language.selectedIndex === -1) {
     el.language.value = "en";
@@ -158,13 +185,13 @@ function buildCommandPalette() {
         <h3>${group.name}</h3>
         ${group.commands
           .map((cmd) => {
-            const phrase = (cmd.phrases[0] || cmd.strictPhrases?.[0] || cmd.id);
+            const phrase = cmd.phrases[0] || cmd.strictPhrases?.[0] || cmd.id;
             const alt = [...(cmd.phrases || []), ...(cmd.strictPhrases || [])].slice(1);
-            const title = alt.length ? ` title="also: ${escapeAttr(alt.join(", "))}"` : "";
+            const title = alt.length ? ` title="also: ${escapeHtml(alt.join(", "))}"` : "";
             return `
               <div class="cmd" data-command="${cmd.id}"${title}>
-                <span class="cmd-phrase">“${escapeHtmlText(phrase)}”</span>
-                ${cmd.hint ? `<span class="cmd-hint">${escapeHtmlText(cmd.hint)}</span>` : ""}
+                <span class="cmd-phrase">“${escapeHtml(phrase)}”</span>
+                ${cmd.hint ? `<span class="cmd-hint">${escapeHtml(cmd.hint)}</span>` : ""}
               </div>`;
           })
           .join("")}
@@ -177,8 +204,7 @@ function flashCommand(cmd) {
   const node = el.commandList.querySelector(`[data-command="${cmd.id}"]`);
   if (node) {
     node.classList.remove("is-fired");
-    // Force a reflow so the animation restarts on a repeated command.
-    void node.offsetWidth;
+    void node.offsetWidth; // restart the animation on a repeated command
     node.classList.add("is-fired");
     setTimeout(() => node.classList.remove("is-fired"), 1400);
   }
@@ -192,7 +218,6 @@ function flashCommand(cmd) {
 function bindEvents() {
   el.btnMic.addEventListener("click", toggleDictation);
   el.btnDemo.addEventListener("click", toggleDemo);
-
   el.btnCopy.addEventListener("click", copyMarkdown);
   el.btnDownload.addEventListener("click", downloadMarkdown);
   el.btnClear.addEventListener("click", clearDocument);
@@ -200,14 +225,19 @@ function bindEvents() {
   el.bannerClose.addEventListener("click", () => (el.banner.hidden = true));
   el.btnEditSource.addEventListener("click", toggleSourceEditing);
 
+  for (const seg of el.segButtons) {
+    seg.addEventListener("click", () => setTextSource(seg.dataset.source));
+  }
+
   el.language.addEventListener("change", () => {
     state.settings.language = el.language.value;
-    state.client?.resetContext?.();
     persistSettings();
   });
 
-  el.fillerLevel.addEventListener("change", () => {
-    state.settings.fillerLevel = el.fillerLevel.value;
+  el.uploadMode.addEventListener("change", () => {
+    state.settings.uploadMode = el.uploadMode.value;
+    if (state.recorder) state.recorder.keepWav = state.settings.uploadMode === "buffered";
+    updateMetaFromSettings();
     persistSettings();
   });
 
@@ -218,8 +248,21 @@ function bindEvents() {
     persistSettings();
   });
 
+  el.fillerLevel.addEventListener("change", () => {
+    state.settings.fillerLevel = el.fillerLevel.value;
+    rebuildDocument();
+    persistSettings();
+  });
+
+  el.llmInstruction.addEventListener("change", () => {
+    state.settings.llmInstruction = el.llmInstruction.value;
+    updateMetaFromSettings();
+    persistSettings();
+  });
+
   el.togglePunctuation.addEventListener("change", () => {
     state.settings.punctuation = el.togglePunctuation.checked;
+    rebuildDocument();
     persistSettings();
   });
 
@@ -234,14 +277,10 @@ function bindEvents() {
     persistSettings();
   });
 
-  for (const tab of el.railTabs) {
-    tab.addEventListener("click", () => selectTab(tab.dataset.tab));
-  }
+  for (const tab of el.railTabs) tab.addEventListener("click", () => selectTab(tab.dataset.tab));
 
-  // Push-to-talk on Space, plus shortcuts.
   document.addEventListener("keydown", onKeyDown);
   document.addEventListener("keyup", onKeyUp);
-
   window.addEventListener("resize", sizeMeter);
   sizeMeter();
 }
@@ -252,26 +291,21 @@ function onKeyDown(event) {
 
   if (meta && event.key === "Enter") {
     event.preventDefault();
-    toggleDictation();
-    return;
+    return toggleDictation();
   }
   if (meta && event.key.toLowerCase() === "s") {
     event.preventDefault();
-    downloadMarkdown();
-    return;
+    return downloadMarkdown();
   }
   if (meta && event.shiftKey && event.key.toLowerCase() === "c") {
     event.preventDefault();
-    copyMarkdown();
-    return;
+    return copyMarkdown();
   }
   if (typing) return;
 
-  if (event.code === "Space" && state.settings.captureMode === "ptt" && state.running) {
-    if (!event.repeat) {
-      event.preventDefault();
-      state.recorder?.pttDown();
-    }
+  if (event.code === "Space" && state.settings.captureMode === "ptt" && state.running && !event.repeat) {
+    event.preventDefault();
+    state.recorder?.pttDown();
   }
 }
 
@@ -300,33 +334,75 @@ function toggleRail() {
 }
 
 // ---------------------------------------------------------------------------
+// Cleaned / verbatim
+// ---------------------------------------------------------------------------
+
+function setTextSource(source) {
+  if (source !== "cleaned" && source !== "verbatim") return;
+  if (state.textSource === source) return;
+  state.textSource = source;
+
+  for (const seg of el.segButtons) seg.classList.toggle("is-active", seg.dataset.source === source);
+  el.app.classList.toggle("is-verbatim", source === "verbatim");
+
+  rebuildDocument();
+  toast(source === "cleaned" ? "Showing llm_response" : "Showing raw transcript", "▸");
+}
+
+/** Which text this response contributes, given the current view. */
+function textFor(result) {
+  if (state.textSource === "verbatim") return result.text || "";
+  // Rewrites are best-effort: a null llm_response with a non-null llm_error is
+  // a successful transcription whose rewrite failed, so fall back to verbatim.
+  return result.llm_response || result.text || "";
+}
+
+/**
+ * Replay every stored transcript through the pipeline.
+ * The pipeline is deterministic, so this is an exact reconstruction rather than
+ * an edit applied on top of the existing document.
+ */
+function rebuildDocument() {
+  const confidence = state.doc.confidence;
+  state.doc = new SpeakdownDoc();
+  state.doc.confidence = confidence;
+
+  for (const result of state.transcripts) {
+    applyTranscript(state.doc, textFor(result), {
+      fillerLevel: state.settings.fillerLevel,
+      punctuation: state.settings.punctuation,
+    });
+  }
+  render();
+}
+
+// ---------------------------------------------------------------------------
 // Dictation lifecycle
 // ---------------------------------------------------------------------------
 
 async function toggleDictation() {
   if (state.mode === "demo") {
-    // No key: the mic would capture fine but every request would 503.
     toast("Demo Mode — add an API key for live dictation", "!", "error");
     return;
   }
-  if (state.running) return stopDictation();
-  return startDictation();
+  return state.running ? stopDictation() : startDictation();
 }
 
 async function startDictation() {
   if (state.editingSource) toggleSourceEditing();
 
-  state.recorder = new Recorder(
-    {
-      onUtterance: handleUtterance,
-      onLevel: (level, threshold) => {
-        state.currentLevel = level;
-        state.threshold = threshold;
-      },
-      onState: onRecorderState,
+  state.recorder = new Recorder({
+    onSpeechStart: handleSpeechStart,
+    onAudio: handleAudio,
+    onSpeechEnd: handleSpeechEnd,
+    onLevel: (level, threshold) => {
+      state.currentLevel = level;
+      state.threshold = threshold;
     },
-  );
+    onState: onRecorderState,
+  });
   state.recorder.setMode(state.settings.captureMode);
+  state.recorder.keepWav = state.settings.uploadMode === "buffered";
 
   try {
     await state.recorder.start();
@@ -352,6 +428,9 @@ async function stopDictation() {
   state.running = false;
   await state.recorder?.stop();
   state.recorder = null;
+  await state.utterance?.abort?.();
+  state.utterance = null;
+  state.pendingPcm = [];
   state.meterMood = "idle";
   el.btnMic.classList.remove("is-listening", "is-speaking");
   el.btnMic.setAttribute("aria-label", "Start dictation");
@@ -362,13 +441,105 @@ async function stopDictation() {
       : "Press the mic, or hit ⌘/Ctrl + Enter";
 }
 
+/**
+ * Speech detected. Open the upstream request immediately — this is the call
+ * that lets transcription overlap with the rest of the utterance.
+ */
+function handleSpeechStart() {
+  if (state.settings.uploadMode === "buffered") return; // nothing opens early
+
+  state.activeSeq = state.seq++;
+  state.pendingPcm = [];
+  state.utterance = null;
+
+  state.utterancePromise = state.client
+    .startUtterance({
+      language: state.settings.language,
+      llmInstruction: state.settings.llmInstruction,
+    })
+    .then((utterance) => {
+      state.utterance = utterance;
+      // The microphone did not wait for this round trip. Flush what it captured.
+      for (const pcm of state.pendingPcm) utterance.send(pcm);
+      state.pendingPcm = [];
+      return utterance;
+    })
+    .catch((err) => {
+      reportTranscriptionError(err);
+      return null;
+    });
+}
+
+function handleAudio(pcmBytes) {
+  if (state.settings.uploadMode === "buffered") return;
+  state.streamedBytes += pcmBytes.length;
+  if (state.utterance) state.utterance.send(pcmBytes);
+  else state.pendingPcm.push(pcmBytes);
+}
+
+async function handleSpeechEnd(info) {
+  if (state.settings.uploadMode === "buffered") {
+    if (info.tooShort || !info.wav) return;
+    const seq = state.seq++;
+    return awaitResult(seq, () =>
+      state.client.transcribeBuffered(info.wav.blob, {
+        language: state.settings.language,
+        llmInstruction: state.settings.llmInstruction,
+      }),
+    );
+  }
+
+  const seq = state.activeSeq;
+  const utterance = await state.utterancePromise;
+  state.utterance = null;
+  state.pendingPcm = [];
+  if (!utterance) return;
+
+  if (info.tooShort) {
+    // A cough or a door. Close the session without spending a transcription.
+    await utterance.abort();
+    return;
+  }
+
+  return awaitResult(seq, () => utterance.end());
+}
+
+/** Run a request, keeping application in spoken order. */
+async function awaitResult(seq, run) {
+  state.inFlight++;
+  updateStatus();
+  try {
+    const result = await run();
+    if (result) state.pending.set(seq, { result });
+  } catch (err) {
+    state.pending.set(seq, { error: err });
+  } finally {
+    state.inFlight--;
+    drainPending();
+    updateStatus();
+  }
+}
+
+function drainPending() {
+  while (state.pending.has(state.nextToApply)) {
+    const item = state.pending.get(state.nextToApply);
+    state.pending.delete(state.nextToApply);
+    state.nextToApply++;
+    if (item.error) reportTranscriptionError(item.error);
+    else if (item.result) applyResult(item.result);
+  }
+}
+
 function onRecorderState(recState, detail) {
   if (recState === RecorderState.SPEAKING) {
     el.btnMic.classList.remove("is-listening");
     el.btnMic.classList.add("is-speaking");
     state.meterMood = "speaking";
     setStatus("Speaking", "is-speaking");
-    el.statusHint.textContent = "Pause for about 700 ms to send the clip";
+    el.statusHint.textContent =
+      state.settings.uploadMode === "streaming"
+        ? "Uploading as you speak"
+        : "Buffering — will send when you pause";
   } else if (recState === RecorderState.LISTENING) {
     el.btnMic.classList.remove("is-speaking");
     el.btnMic.classList.add("is-listening");
@@ -389,7 +560,7 @@ function onRecorderState(recState, detail) {
 function updateStatus() {
   if (state.inFlight > 0) {
     setStatus(`Transcribing${state.inFlight > 1 ? ` ×${state.inFlight}` : ""}`, "is-working");
-    el.statusHint.textContent = "Request in flight";
+    el.statusHint.textContent = "Waiting on the tail";
     return;
   }
   if (!state.running && !state.demoRunning) return;
@@ -403,49 +574,17 @@ function setStatus(text, cls = "") {
 }
 
 // ---------------------------------------------------------------------------
-// Utterance handling — ordered concurrency
+// Applying a transcript
 // ---------------------------------------------------------------------------
 
-async function handleUtterance(utterance) {
-  const id = state.seq++;
-  state.inFlight++;
-  updateStatus();
-
-  try {
-    const result = await state.client.transcribe(utterance.blob, {
-      language: state.settings.language,
-    });
-    state.pending.set(id, { result, utterance });
-  } catch (err) {
-    state.pending.set(id, { error: err, utterance });
-  } finally {
-    state.inFlight--;
-    drainPending();
-    updateStatus();
-  }
-}
-
-function drainPending() {
-  while (state.pending.has(state.nextToApply)) {
-    const item = state.pending.get(state.nextToApply);
-    state.pending.delete(state.nextToApply);
-    state.nextToApply++;
-    if (item.error) reportTranscriptionError(item.error);
-    else if (item.result) applyResult(item.result);
-  }
-}
-
-/**
- * Turn one API response into document changes.
- * @param {object} result
- */
 function applyResult(result) {
-  const raw = String(result.text || "").trim();
-  if (!raw) return;
+  const chosen = textFor(result);
+  if (!chosen.trim()) return;
 
+  state.transcripts.push(result);
   state.doc.recordWords(result.words);
 
-  const report = applyTranscript(state.doc, raw, {
+  const report = applyTranscript(state.doc, chosen, {
     fillerLevel: state.settings.fillerLevel,
     punctuation: state.settings.punctuation,
   });
@@ -458,37 +597,33 @@ function applyResult(result) {
     else stopDictation();
   }
 
-  if (report.appliedText) state.client.pushContext?.(report.prose);
+  if (result.llm_error) {
+    toast(`Rewrite ${result.llm_error} — using verbatim`, "!", "error");
+  }
 
-  logActivity(result, { removed: report.removed, commands: report.commands });
-  recordLatency(result);
+  logActivity(result, report);
+  recordTimings(result);
   render();
 }
 
 function reportTranscriptionError(err) {
-  const code = err.code || "error";
-  const authIssue = err.status === 401 || err.status === 403 || code === "no_api_key";
-
   logActivityError(err);
 
-  if (authIssue) {
-    showBanner(
-      "AssemblyAI rejected the API key. Check ASSEMBLYAI_API_KEY in .env and restart the server.",
-      true,
-    );
+  if (err.fatal || err.code === "invalid_api_key" || err.code === "no_api_key") {
+    showBanner(err.message, true);
     stopDictation();
-  } else if (err.status === 429) {
+    return;
+  }
+  if (err.status === 429) {
     showBanner(
       `Rate limited by AssemblyAI${err.retryAfter ? ` — retry after ${err.retryAfter}s` : ""}. ` +
         "Speak in longer stretches to send fewer, larger clips.",
       true,
     );
-  } else if (code === "audio_too_short") {
-    // Routine: a cough or a door. Not worth bothering the user about.
     return;
-  } else {
-    toast(err.message || "Transcription failed", "!", "error");
   }
+  if (err.code === "audio_too_short") return; // routine
+  toast(err.message || "Transcription failed", "!", "error");
 }
 
 // ---------------------------------------------------------------------------
@@ -497,23 +632,17 @@ function reportTranscriptionError(err) {
 
 function render() {
   const markdown = state.doc.toMarkdown();
-  const empty = state.doc.isEmpty();
-
-  const lowConfidence = new Set(
-    state.doc.lowConfidenceTerms(0.75).map((entry) => entry.word),
-  );
+  const lowConfidence = new Set(state.doc.lowConfidenceTerms(0.75).map((e) => e.word));
 
   if (!state.editingSource) {
     el.source.innerHTML = highlightSource(markdown, lowConfidence);
   }
   el.preview.innerHTML = renderMarkdown(markdown);
-  el.emptyState.hidden = !empty;
+  el.emptyState.hidden = !state.doc.isEmpty();
 
   const words = wordCount(markdown.replace(/[#>`*_~\-[\]()]/g, " "));
-  state.doc.stats.words = words;
   el.docStats.textContent = `${words} word${words === 1 ? "" : "s"}`;
   el.statWords.textContent = String(words);
-  el.statFillers.textContent = String(state.doc.stats.fillersRemoved);
   el.statCommands.textContent = String(state.doc.stats.commands);
 
   if (state.settings.autoscroll) {
@@ -525,55 +654,107 @@ function render() {
   }
 }
 
-function recordLatency(result) {
-  const round = result._speakdown?.roundTripMs ?? result.request_time_ms;
-  if (typeof round !== "number") return;
+function recordTimings(result) {
+  const wait = result._speakdown?.waitAfterSpeechMs;
+  if (typeof wait === "number") {
+    state.waits.push(wait);
+    if (state.waits.length > 500) state.waits.shift();
+    el.statWait.textContent = `${wait}ms`;
 
-  state.latencies.push(round);
-  if (state.latencies.length > 500) state.latencies.shift();
+    const sorted = [...state.waits].sort((a, b) => a - b);
+    el.statMedian.textContent = `${sorted[Math.floor(sorted.length / 2)]}ms`;
+  }
 
-  el.statLatency.textContent = `${round}ms`;
-  el.statLatency.parentElement.title =
-    `server ${result.request_time_ms ?? "?"}ms · network ${result._speakdown?.networkMs ?? "?"}ms`;
+  el.statWait.parentElement.title =
+    `server ${result.request_time_ms ?? "?"}ms ` +
+    `(transcribe ${result.sync_time_ms ?? "?"}ms + rewrite ${result._speakdown?.rewriteMs ?? "?"}ms)`;
 
-  const sorted = [...state.latencies].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)];
-  el.statMedian.textContent = `${median}ms`;
+  const streaming = result._speakdown?.mode === "streaming";
+  el.statStreamed.parentElement.classList.toggle("stat-muted", !streaming);
+  if (streaming && result._speakdown?.uploadHeldMs != null) {
+    el.statStreamed.textContent = `${(result._speakdown.uploadHeldMs / 1000).toFixed(1)}s`;
+  } else {
+    el.statStreamed.textContent = streaming ? "—" : "off";
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Activity log
 // ---------------------------------------------------------------------------
 
-function logActivity(result, { removed, commands }) {
+function logActivity(result, report) {
   el.activityEmpty.hidden = true;
 
-  const round = result._speakdown?.roundTripMs ?? result.request_time_ms ?? 0;
-  const confidence = typeof result.confidence === "number" ? result.confidence : null;
+  const sd = result._speakdown || {};
+  const wait = sd.waitAfterSpeechMs ?? result.request_time_ms ?? 0;
 
   const chips = [
-    `<span class="chip ${round <= 250 ? "chip-fast" : "chip-slow"}">${round}ms</span>`,
-    result.request_time_ms != null
-      ? `<span class="chip">srv ${result.request_time_ms}ms</span>`
+    `<span class="chip ${wait <= 400 ? "chip-fast" : "chip-slow"}">${wait}ms wait</span>`,
+    sd.mode === "streaming"
+      ? `<span class="chip chip-stream">streamed${sd.chunks ? ` ${sd.chunks}×` : ""}</span>`
+      : `<span class="chip">buffered</span>`,
+    result.sync_time_ms != null ? `<span class="chip">stt ${result.sync_time_ms}ms</span>` : "",
+    sd.rewriteMs != null ? `<span class="chip chip-rewrite">rewrite ${sd.rewriteMs}ms</span>` : "",
+    typeof result.confidence === "number"
+      ? `<span class="chip">conf ${(result.confidence * 100).toFixed(0)}%</span>`
       : "",
-    confidence != null ? `<span class="chip">conf ${(confidence * 100).toFixed(0)}%</span>` : "",
     result.audio_duration_ms
       ? `<span class="chip">${(result.audio_duration_ms / 1000).toFixed(1)}s audio</span>`
       : "",
-    commands.length
-      ? `<span class="chip chip-cmd">${commands.length} cmd</span>`
-      : "",
-    removed ? `<span class="chip">−${removed} filler</span>` : "",
+    report.commands.length ? `<span class="chip chip-cmd">${report.commands.length} cmd</span>` : "",
+    result.llm_error ? `<span class="chip chip-err">rewrite ${result.llm_error}</span>` : "",
   ]
     .filter(Boolean)
     .join("");
 
   const item = document.createElement("li");
   item.className = "act";
-  item.innerHTML = `<p class="act-text">${escapeHtmlText(result.text)}</p><div class="act-meta">${chips}</div>`;
+  item.innerHTML =
+    `<p class="act-text">${escapeHtml(textFor(result))}</p>` +
+    rewriteDiffHtml(result) +
+    `<div class="act-meta">${chips}</div>`;
   el.activity.prepend(item);
 
   while (el.activity.children.length > 40) el.activity.lastElementChild.remove();
+}
+
+/**
+ * Show what the rewrite removed, when it removed anything.
+ *
+ * The default cleanup only deletes words, so a word-level diff that marks
+ * deletions is an accurate picture of it rather than an approximation.
+ */
+function rewriteDiffHtml(result) {
+  const verbatim = (result.text || "").trim();
+  const cleaned = (result.llm_response || "").trim();
+  if (!verbatim || !cleaned || verbatim === cleaned) return "";
+
+  const before = verbatim.split(/\s+/);
+  const after = cleaned.split(/\s+/);
+  const parts = [];
+  let i = 0;
+  let j = 0;
+  let removed = 0;
+
+  while (i < before.length) {
+    const a = before[i];
+    const b = after[j];
+    if (b !== undefined && a.toLowerCase() === b.toLowerCase()) {
+      parts.push(escapeHtml(a));
+      i++;
+      j++;
+    } else {
+      parts.push(`<del>${escapeHtml(a)}</del>`);
+      removed++;
+      i++;
+    }
+  }
+  if (!removed) return "";
+
+  return (
+    `<div class="act-diff"><span class="act-diff-label">rewrite removed ${removed} word${removed === 1 ? "" : "s"}</span>` +
+    `${parts.join(" ")}</div>`
+  );
 }
 
 function logActivityError(err) {
@@ -581,8 +762,8 @@ function logActivityError(err) {
   const item = document.createElement("li");
   item.className = "act";
   item.innerHTML =
-    `<p class="act-text">${escapeHtmlText(err.message || "Request failed")}</p>` +
-    `<div class="act-meta"><span class="chip chip-err">${escapeHtmlText(err.code || "error")}</span></div>`;
+    `<p class="act-text">${escapeHtml(err.message || "Request failed")}</p>` +
+    `<div class="act-meta"><span class="chip chip-err">${escapeHtml(err.code || "error")}</span></div>`;
   el.activity.prepend(item);
 }
 
@@ -610,8 +791,9 @@ function startMeterLoop() {
 
 function drawMeter() {
   const ctx = el.meterCtx;
-  const w = el.meter.width / (window.devicePixelRatio || 1);
-  const h = el.meter.height / (window.devicePixelRatio || 1);
+  const dpr = window.devicePixelRatio || 1;
+  const w = el.meter.width / dpr;
+  const h = el.meter.height / dpr;
   ctx.clearRect(0, 0, w, h);
 
   const count = state.levels.length;
@@ -624,10 +806,9 @@ function drawMeter() {
     listening: "rgba(94, 234, 212, 0.85)",
     speaking: "rgba(255, 93, 93, 0.9)",
   };
-  const quiet = "rgba(107, 115, 130, 0.35)";
 
-  // Threshold guides — makes the VAD's decision visible, which is genuinely
-  // useful when you are working out why a room is not segmenting well.
+  // Threshold guides make the VAD's decision visible, which is genuinely useful
+  // when working out why a room is not segmenting well.
   const thresholdY = Math.min(mid - 1, perceptual(state.threshold) * mid);
   ctx.strokeStyle = "rgba(245, 181, 68, 0.22)";
   ctx.setLineDash([3, 4]);
@@ -643,10 +824,10 @@ function drawMeter() {
   for (let i = 0; i < count; i++) {
     const level = state.levels[i];
     const amplitude = Math.max(0.8, perceptual(level) * (mid - 2));
-    const x = i * (barWidth + gap);
-    const active = level > state.threshold;
-    ctx.fillStyle = active ? colours[state.meterMood] || colours.idle : quiet;
-    roundRect(ctx, x, mid - amplitude, barWidth, amplitude * 2, Math.min(1.5, barWidth / 2));
+    ctx.fillStyle = level > state.threshold
+      ? colours[state.meterMood] || colours.idle
+      : "rgba(107, 115, 130, 0.35)";
+    roundRect(ctx, i * (barWidth + gap), mid - amplitude, barWidth, amplitude * 2, Math.min(1.5, barWidth / 2));
     ctx.fill();
   }
 }
@@ -658,11 +839,8 @@ function perceptual(level) {
 
 function roundRect(ctx, x, y, w, h, r) {
   ctx.beginPath();
-  if (ctx.roundRect) {
-    ctx.roundRect(x, y, w, h, r);
-  } else {
-    ctx.rect(x, y, w, h);
-  }
+  if (ctx.roundRect) ctx.roundRect(x, y, w, h, r);
+  else ctx.rect(x, y, w, h);
 }
 
 // ---------------------------------------------------------------------------
@@ -670,8 +848,7 @@ function roundRect(ctx, x, y, w, h, r) {
 // ---------------------------------------------------------------------------
 
 async function toggleDemo() {
-  if (state.demoRunning) return stopDemo();
-  return runDemo();
+  return state.demoRunning ? stopDemo() : runDemo();
 }
 
 async function runDemo() {
@@ -683,25 +860,19 @@ async function runDemo() {
   el.btnMic.classList.add("is-listening");
   state.meterMood = "listening";
 
-  if (state.client.remaining === 0) {
-    state.doc = new SpeakdownDoc();
-    state.client.reset();
-    state.latencies = [];
-    el.activity.innerHTML = "";
-    el.activityEmpty.hidden = false;
-    render();
-  }
+  if (state.client.remaining === 0) resetSession();
 
   while (state.demoRunning && !state.demoAbort && state.client.remaining > 0) {
-    // Simulated speech: drive the meter for a beat so the UI behaves as it
-    // does live, then fire the scripted "response".
-    const utteranceIndex = DEMO_SCRIPT.length - state.client.remaining;
-    const speakMs = 700 + Math.min(1600, (DEMO_SCRIPT[utteranceIndex] || "").length * 18);
+    const entry = DEMO_SCRIPT[DEMO_SCRIPT.length - state.client.remaining];
+    const speakMs = 700 + Math.min(1600, (entry?.text || "").length * 16);
+
+    const utterance = await state.client.startUtterance();
 
     el.btnMic.classList.remove("is-listening");
     el.btnMic.classList.add("is-speaking");
     state.meterMood = "speaking";
     setStatus("Speaking", "is-speaking");
+    el.statusHint.textContent = "Uploading as you speak";
     await animateFakeLevels(speakMs);
     if (state.demoAbort) break;
 
@@ -711,12 +882,12 @@ async function runDemo() {
     state.currentLevel = 0;
     setStatus("Transcribing", "is-working");
 
-    const result = await state.client.transcribe();
+    const result = await utterance.end();
     if (!result || state.demoAbort) break;
 
     applyResult(result);
     setStatus("Demo running");
-    await sleep(260);
+    await sleep(240);
   }
 
   if (state.client.remaining === 0 && !state.demoAbort) {
@@ -760,11 +931,9 @@ async function copyMarkdown() {
     await navigator.clipboard.writeText(markdown);
     toast("Markdown copied", "✓");
   } catch {
-    // Clipboard API needs a secure context; fall back to a selection copy.
     const area = document.createElement("textarea");
     area.value = markdown;
-    area.style.position = "fixed";
-    area.style.opacity = "0";
+    area.style.cssText = "position:fixed;opacity:0";
     document.body.append(area);
     area.select();
     document.execCommand("copy");
@@ -777,13 +946,13 @@ function downloadMarkdown() {
   const markdown = currentMarkdown();
   if (!markdown.trim()) return toast("Nothing to export", "!", "error");
 
-  const title = firstHeading(markdown) || "speakdown";
-  const slug = title
-    .toLowerCase()
-    .replace(/[^\w\s-]/g, "")
-    .trim()
-    .replace(/\s+/g, "-")
-    .slice(0, 48) || "speakdown";
+  const slug =
+    (firstHeading(markdown) || "speakdown")
+      .toLowerCase()
+      .replace(/[^\w\s-]/g, "")
+      .trim()
+      .replace(/\s+/g, "-")
+      .slice(0, 48) || "speakdown";
 
   const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
   const url = URL.createObjectURL(blob);
@@ -797,22 +966,27 @@ function downloadMarkdown() {
   toast(`Saved ${slug}.md`, "✓");
 }
 
-function clearDocument() {
-  if (!state.doc.isEmpty() && !confirm("Clear the document? This cannot be undone by voice.")) {
-    return;
-  }
-  const stats = { words: 0, fillersRemoved: 0, commands: 0, utterances: 0 };
+function resetSession() {
   state.doc = new SpeakdownDoc();
-  state.doc.stats = stats;
-  state.client?.resetContext?.();
+  state.transcripts = [];
+  state.waits = [];
+  state.streamedBytes = 0;
+  state.seq = 0;
+  state.nextToApply = 0;
+  state.pending.clear();
   if (state.mode === "demo") state.client.reset();
-  state.latencies = [];
   el.activity.innerHTML = "";
   el.activityEmpty.hidden = false;
-  el.statLatency.textContent = "—";
+  el.statWait.textContent = "—";
   el.statMedian.textContent = "—";
+  el.statStreamed.textContent = "—";
   el.btnDemo.textContent = "Play demo";
+}
+
+function clearDocument() {
+  if (!state.doc.isEmpty() && !confirm("Clear the document? This cannot be undone by voice.")) return;
   if (state.editingSource) toggleSourceEditing();
+  resetSession();
   render();
 }
 
@@ -827,12 +1001,15 @@ function toggleSourceEditing() {
     el.btnEditSource.textContent = "Done";
     el.sourceEdit.focus();
   } else {
-    // Re-parse the hand-edited markdown, carrying confidence and counters over.
+    // A hand edit becomes the document. The transcript log no longer describes
+    // it, so it is dropped rather than left to silently revert the edit on the
+    // next Cleaned/Verbatim toggle.
     const confidence = state.doc.confidence;
     const stats = state.doc.stats;
     state.doc = SpeakdownDoc.fromMarkdown(el.sourceEdit.value);
     state.doc.confidence = confidence;
     state.doc.stats = stats;
+    state.transcripts = [];
     el.sourceEdit.hidden = true;
     el.source.hidden = false;
     el.btnEditSource.textContent = "Edit";
@@ -862,14 +1039,12 @@ function showBanner(text, isError = false) {
 function toast(message, icon = "▸", variant = "") {
   const node = document.createElement("div");
   node.className = `toast ${variant === "error" ? "is-error" : ""}`.trim();
-  node.innerHTML = `<span class="toast-icon">${escapeHtmlText(icon)}</span><span>${escapeHtmlText(message)}</span>`;
+  node.innerHTML = `<span class="toast-icon">${escapeHtml(icon)}</span><span>${escapeHtml(message)}</span>`;
   el.toasts.append(node);
-
   setTimeout(() => {
     node.classList.add("is-out");
     setTimeout(() => node.remove(), 240);
   }, 1500);
-
   while (el.toasts.children.length > 4) el.toasts.firstElementChild.remove();
 }
 
@@ -877,7 +1052,7 @@ function toast(message, icon = "▸", variant = "") {
 // Settings persistence
 // ---------------------------------------------------------------------------
 
-const SETTINGS_KEY = "speakdown.settings.v1";
+const SETTINGS_KEY = "speakdown.settings.v2";
 
 function persistSettings() {
   try {
@@ -896,30 +1071,14 @@ function restoreSettings() {
   }
   if (saved && typeof saved === "object") Object.assign(state.settings, saved);
 
-  el.fillerLevel.value = state.settings.fillerLevel;
+  el.uploadMode.value = state.settings.uploadMode;
   el.captureMode.value = state.settings.captureMode;
+  el.fillerLevel.value = state.settings.fillerLevel;
+  el.llmInstruction.value = state.settings.llmInstruction || "";
   el.togglePunctuation.checked = !!state.settings.punctuation;
   el.toggleHeatmap.checked = !!state.settings.heatmap;
   el.toggleAutoscroll.checked = !!state.settings.autoscroll;
   el.app.classList.toggle("no-heatmap", !state.settings.heatmap);
-}
-
-// ---------------------------------------------------------------------------
-// Small utilities
-// ---------------------------------------------------------------------------
-
-function escapeHtmlText(text) {
-  return String(text).replace(/[&<>"']/g, (c) => ({
-    "&": "&amp;",
-    "<": "&lt;",
-    ">": "&gt;",
-    '"': "&quot;",
-    "'": "&#39;",
-  })[c]);
-}
-
-function escapeAttr(text) {
-  return escapeHtmlText(text).replace(/\n/g, " ");
 }
 
 function sleep(ms) {

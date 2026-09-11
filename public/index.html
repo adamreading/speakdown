@@ -6,7 +6,7 @@
     <title>Speakdown — dictate prose, speak the formatting</title>
     <meta
       name="description"
-      content="A voice-native markdown editor built on the AssemblyAI Sync (Dictation) API. Dictate the prose, speak the formatting."
+      content="A voice-native markdown editor built on the AssemblyAI Dictation API. Dictate the prose, speak the formatting."
     />
     <link
       rel="icon"
@@ -69,6 +69,10 @@
           <div class="pane-head">
             <h2>Markdown</h2>
             <div class="pane-head-actions">
+              <div class="segmented" id="sourceToggle" role="group" aria-label="Transcript source">
+                <button class="seg is-active" data-source="cleaned" title="The API's llm_response — disfluencies removed">Cleaned</button>
+                <button class="seg" data-source="verbatim" title="The API's text field — exactly as spoken">Verbatim</button>
+              </div>
               <label class="toggle" title="Underline words the model was unsure about">
                 <input type="checkbox" id="toggleHeatmap" checked />
                 <span>Confidence</span>
@@ -128,15 +132,15 @@
 
           <div class="rail-panel" id="tab-settings" role="tabpanel">
             <div class="setting">
-              <label class="setting-label" for="fillerLevel">Filler removal</label>
-              <select id="fillerLevel">
-                <option value="off">Off — keep every word</option>
-                <option value="standard" selected>Standard — um, uh, you know</option>
-                <option value="aggressive">Aggressive — also basically, actually, like</option>
+              <label class="setting-label" for="uploadMode">Upload</label>
+              <select id="uploadMode">
+                <option value="streaming" selected>Stream while speaking</option>
+                <option value="buffered">Buffer, then send</option>
               </select>
               <p class="setting-hint">
-                Done client-side. The Sync API reference documents no filler-removal
-                option, so Speakdown strips them here and counts what it dropped.
+                The endpoint transcribes audio as it arrives. Streaming opens the
+                request the moment you start talking, so when you stop you only
+                wait for the tail. Switch to buffered to feel the difference.
               </p>
             </div>
 
@@ -147,8 +151,22 @@
                 <option value="ptt">Push to talk — hold Space</option>
               </select>
               <p class="setting-hint">
-                Continuous mode closes an utterance after ~700 ms of silence and keeps
-                300 ms of pre-roll so the first sound is not clipped.
+                Continuous mode closes an utterance after ~700 ms of silence and
+                keeps 300 ms of pre-roll so the first sound is not clipped.
+              </p>
+            </div>
+
+            <div class="setting">
+              <label class="setting-label" for="fillerLevel">Extra local cleanup</label>
+              <select id="fillerLevel">
+                <option value="off" selected>Off — trust the API rewrite</option>
+                <option value="standard">Standard — also strip um, uh, you know</option>
+                <option value="aggressive">Aggressive — also basically, actually, like</option>
+              </select>
+              <p class="setting-hint">
+                The API's rewrite already removes disfluencies by default, so this
+                is off. Turn it on to strip discourse markers the rewrite keeps
+                on purpose.
               </p>
             </div>
 
@@ -158,8 +176,8 @@
                 <span>Spoken punctuation</span>
               </label>
               <p class="setting-hint">
-                Off by default — the model already punctuates prose. Turn on to say
-                “comma”, “full stop”, “open quote” literally.
+                Off by default — the model already punctuates prose. Turn on to
+                say “comma”, “full stop”, “open quote” literally.
               </p>
             </div>
 
@@ -170,14 +188,30 @@
               </label>
             </div>
 
+            <div class="setting">
+              <label class="setting-label" for="llmInstruction">llm_instruction (advanced)</label>
+              <textarea
+                id="llmInstruction"
+                rows="3"
+                placeholder="Leave empty for the default cleanup"
+                spellcheck="false"
+              ></textarea>
+              <p class="setting-hint">
+                Empty means the field is omitted, which keeps AssemblyAI's default
+                disfluency removal. Anything here <em>replaces</em> that task —
+                describe only the transformation.
+              </p>
+            </div>
+
             <div class="setting setting-meta">
               <h3>Request shape</h3>
               <dl class="meta-list">
                 <dt>Endpoint</dt><dd id="metaEndpoint">—</dd>
-                <dt>Model</dt><dd id="metaModel">—</dd>
-                <dt>Audio</dt><dd>16 kHz mono, 16-bit WAV</dd>
+                <dt>Body</dt><dd>multipart — config, then audio</dd>
+                <dt>Audio</dt><dd id="metaAudio">16 kHz mono PCM, streamed</dd>
                 <dt>keyterms_prompt</dt><dd id="metaKeyterms">—</dd>
-                <dt>conversation_context</dt><dd id="metaContext">rolling, 8 turns</dd>
+                <dt>stt_prompt</dt><dd>situation description</dd>
+                <dt>llm_instruction</dt><dd id="metaLlm">omitted — default cleanup</dd>
               </dl>
             </div>
           </div>
@@ -213,20 +247,20 @@
 
         <div class="dock-stats">
           <div class="stat stat-latency">
-            <span class="stat-value" id="statLatency">—</span>
-            <span class="stat-label">last round trip</span>
+            <span class="stat-value" id="statWait">—</span>
+            <span class="stat-label">wait after speech</span>
           </div>
           <div class="stat">
             <span class="stat-value" id="statMedian">—</span>
-            <span class="stat-label">median</span>
+            <span class="stat-label">median wait</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value" id="statStreamed">—</span>
+            <span class="stat-label">sent while talking</span>
           </div>
           <div class="stat">
             <span class="stat-value" id="statWords">0</span>
             <span class="stat-label">words</span>
-          </div>
-          <div class="stat">
-            <span class="stat-value" id="statFillers">0</span>
-            <span class="stat-label">fillers cut</span>
           </div>
           <div class="stat">
             <span class="stat-value" id="statCommands">0</span>

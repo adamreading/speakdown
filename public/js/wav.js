@@ -1,10 +1,17 @@
 /**
  * Float32 audio -> 16-bit PCM WAV, in the browser.
  *
- * This module exists because of one hard constraint in the AssemblyAI Sync API:
- * it accepts "WAV or raw PCM S16LE — 16-bit only". The browser's MediaRecorder
- * hands you webm/opus, which the endpoint will not take. So we capture raw
- * Float32 frames via Web Audio and encode the container ourselves.
+ * This module exists because of one hard constraint in the AssemblyAI Dictation
+ * API: the audio part must be `audio/wav` or `audio/pcm` (raw 16-bit), and
+ * compressed formats — MP3, M4A, FLAC, OGG, WebM — are rejected with 415. The
+ * browser's MediaRecorder hands you webm/opus, so we capture raw Float32 frames
+ * via Web Audio and build the 16-bit representation ourselves.
+ *
+ * Two output shapes, for the two upload paths:
+ *   encodeWav          a complete WAV clip, for the buffered request
+ *   floatToPcmBytes    raw PCM bytes, for the streaming upload — no container
+ *                      header means no length to backfill, so frames can leave
+ *                      the moment they exist
  *
  * It is the single most common place a dictation integration goes wrong, so it
  * is isolated here and unit-tested in test/wav.test.js.
@@ -175,4 +182,76 @@ function writeAscii(view, offset, text) {
   for (let i = 0; i < text.length; i++) {
     view.setUint8(offset + i, text.charCodeAt(i));
   }
+}
+
+/**
+ * A resampler that can be fed frame by frame.
+ *
+ * The one-shot `resample` above needs the whole buffer, which is no use when
+ * frames are going up the wire as they are captured. Integer-ratio block
+ * averaging only works on whole blocks, so this carries the leftover samples
+ * across calls rather than dropping them — without the carry you lose up to two
+ * samples per 128-sample frame, which at 8 ms a frame is an audible, steadily
+ * accumulating drift over a long utterance.
+ */
+export class StreamingResampler {
+  constructor(fromRate, toRate = TARGET_SAMPLE_RATE) {
+    this.fromRate = fromRate;
+    this.toRate = toRate;
+    this.ratio = fromRate / toRate;
+    this.passthrough = fromRate === toRate;
+    this.integer = Number.isInteger(this.ratio) && this.ratio > 1;
+    this.carry = new Float32Array(0);
+  }
+
+  /**
+   * @param {Float32Array} frame
+   * @returns {Float32Array} resampled samples ready to send (may be empty)
+   */
+  push(frame) {
+    if (this.passthrough) return frame;
+
+    const joined = concatFrames([this.carry, frame]);
+
+    if (this.integer) {
+      const usable = Math.floor(joined.length / this.ratio) * this.ratio;
+      this.carry = joined.slice(usable);
+      if (!usable) return new Float32Array(0);
+      return resample(joined.slice(0, usable), this.fromRate, this.toRate);
+    }
+
+    // Fractional ratio: keep a one-sample tail so interpolation has a right
+    // neighbour on the next call.
+    const outLength = Math.floor((joined.length - 1) / this.ratio);
+    if (outLength <= 0) {
+      this.carry = joined;
+      return new Float32Array(0);
+    }
+    const consumed = Math.min(joined.length, Math.ceil(outLength * this.ratio) + 1);
+    this.carry = joined.slice(consumed - 1);
+    return resample(joined.slice(0, consumed), this.fromRate, this.toRate);
+  }
+
+  /** Flush whatever is left at the end of an utterance. */
+  flush() {
+    if (this.passthrough || !this.carry.length) {
+      const tail = this.carry;
+      this.carry = new Float32Array(0);
+      return this.passthrough ? new Float32Array(0) : tail;
+    }
+    const out = resample(this.carry, this.fromRate, this.toRate);
+    this.carry = new Float32Array(0);
+    return out;
+  }
+}
+
+/**
+ * Int16 samples as a little-endian byte buffer — the wire format for the
+ * streaming path, where raw PCM needs no container at all.
+ * @param {Float32Array} samples
+ * @returns {Uint8Array}
+ */
+export function floatToPcmBytes(samples) {
+  const ints = floatToInt16(samples);
+  return new Uint8Array(ints.buffer, ints.byteOffset, ints.byteLength);
 }

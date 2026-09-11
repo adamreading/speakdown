@@ -292,16 +292,21 @@ export const KEYTERMS = (() => {
 })();
 
 /**
- * Sent as the `prompt` config field. Tells the model what kind of audio this is
- * so it biases towards document prose and recognises the command register.
+ * Sent as the `stt_prompt` config field.
+ *
+ * Per the API docs this field "describes the situation rather than instructing
+ * the model" — it is prepended to the base transcription prompt. So it is
+ * written as a description of what the microphone is hearing, not as a list of
+ * orders. The job of pinning the exact command wording belongs to
+ * `keyterms_prompt` below, which is the parameter built for it.
  */
-export const DICTATION_PROMPT = [
-  "The speaker is dictating a written document and speaking formatting commands aloud.",
-  "Transcribe formatting commands literally as spoken words, for example:",
-  "heading two, new paragraph, bullet list, numbered list, block quote, code block,",
-  "end code block, bold that, italic that, scratch that, divider, new line.",
-  "Expect technical and product vocabulary, proper nouns, and British English spelling.",
-  "Punctuate prose normally. Do not summarise, reorder or rephrase anything.",
+export const STT_PROMPT = [
+  "A person dictating a written document at a keyboard-free desk.",
+  "They speak the prose of the document and also say its formatting aloud,",
+  "using short phrases such as heading two, new paragraph, bullet list,",
+  "block quote, code block, bold that and scratch that between sentences.",
+  "The subject matter is technical and product work, with proper nouns,",
+  "product names and British English spelling.",
 ].join(" ");
 
 // ---------------------------------------------------------------------------

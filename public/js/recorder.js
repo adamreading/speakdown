@@ -1,40 +1,44 @@
 /**
  * Microphone capture with voice-activity segmentation.
  *
- * The Sync API takes a discrete clip and returns a transcript in one round
- * trip. So the interesting problem is not streaming — it is deciding where one
- * utterance ends and the next begins, and doing it fast enough that dictation
- * feels continuous.
+ * The Dictation API transcribes audio as it arrives, so the goal here is not
+ * just "cut the audio into utterances" — it is to know that speech has STARTED
+ * as early as possible, so the upload can open and frames can begin flowing
+ * while the person is still talking. What they wait for when they stop is then
+ * only the tail of the clip.
  *
- * The segmenter here is a two-state machine over frame energy, with three
- * details that matter more than the algorithm choice:
+ * That shapes the event surface: this emits `onSpeechStart` the instant the
+ * segmenter opens an utterance, `onAudio` repeatedly with PCM as it is
+ * captured, and `onSpeechEnd` when silence closes it.
  *
- *   1. Pre-roll. We retain ~300 ms of audio from *before* speech was detected.
- *      Without it every utterance loses its first consonant, and "bullet list"
- *      arrives as "ullet list".
+ * Three details matter more than the VAD algorithm itself:
+ *
+ *   1. Pre-roll. ~300 ms of audio from *before* speech was detected is retained
+ *      and flushed as the first chunk. Without it every utterance loses its
+ *      first consonant and "bullet list" arrives as "ullet list".
  *   2. Adaptive noise floor. A fixed threshold works in a quiet room and fails
- *      on a laptop fan. The floor tracks ambient level and the speech threshold
- *      floats above it.
- *   3. Hysteresis. Speech onset and offset use different thresholds, so a brief
- *      dip mid-word does not split an utterance in two.
+ *      next to a laptop fan, so the threshold floats above measured ambience.
+ *   3. Hysteresis. Onset and offset use different thresholds, so a dip mid-word
+ *      does not split one utterance into two.
  */
 
-import { framesToWav, rms } from "./wav.js";
+import { framesToWav, floatToPcmBytes, rms, StreamingResampler, TARGET_SAMPLE_RATE } from "./wav.js";
 
 const DEFAULTS = {
   /** Frame energy must exceed the threshold for this long to open an utterance. */
   onsetMs: 120,
-  /** Silence for this long closes the utterance. Tune down for snappier, up for fewer splits. */
+  /** Silence for this long closes it. Down for snappier, up for fewer splits. */
   hangoverMs: 700,
   /** Audio retained from before onset, so the first phoneme survives. */
   prerollMs: 300,
-  /** Force a flush here. Well under the API's 120 s ceiling. */
-  maxUtteranceMs: 20_000,
+  /** Flush PCM upstream at roughly this cadence while speaking. */
+  chunkMs: 120,
+  /** Force a close here. The API's hard ceiling is 120 s. */
+  maxUtteranceMs: 60_000,
   /** Shorter than this is a click, a breath or a door — not worth a request. */
   minUtteranceMs: 250,
   /** Absolute floor, so a silent room cannot drive the threshold to zero. */
   minThreshold: 0.008,
-  /** Speech threshold = noiseFloor * this. */
   thresholdFactor: 3.5,
   /** Offset threshold as a fraction of onset threshold (hysteresis). */
   releaseRatio: 0.6,
@@ -51,43 +55,40 @@ export const RecorderState = {
 export class Recorder {
   /**
    * @param {object} handlers
-   * @param {(u: {blob: Blob, durationMs: number, sampleCount: number, trigger: string}) => void} handlers.onUtterance
+   * @param {() => void} [handlers.onSpeechStart]   Utterance opened — open the upload.
+   * @param {(pcm: Uint8Array) => void} [handlers.onAudio]  PCM ready to send.
+   * @param {(info: object) => void} [handlers.onSpeechEnd] Utterance closed.
    * @param {(level: number, threshold: number) => void} [handlers.onLevel]
    * @param {(state: string, detail?: any) => void} [handlers.onState]
    * @param {object} [options]
    */
   constructor(handlers = {}, options = {}) {
-    this.onUtterance = handlers.onUtterance || (() => {});
+    this.onSpeechStart = handlers.onSpeechStart || (() => {});
+    this.onAudio = handlers.onAudio || (() => {});
+    this.onSpeechEnd = handlers.onSpeechEnd || (() => {});
     this.onLevel = handlers.onLevel || (() => {});
     this.onState = handlers.onState || (() => {});
     this.opts = { ...DEFAULTS, ...options };
 
     this.mode = "vad"; // 'vad' | 'ptt'
+    /** Keep every frame so a WAV can be built at the end (buffered mode / A-B). */
+    this.keepWav = false;
     this.state = RecorderState.IDLE;
 
     this.ctx = null;
     this.stream = null;
     this.node = null;
     this.source = null;
-    this.sampleRate = 16000;
+    this.sampleRate = TARGET_SAMPLE_RATE;
+    this.resampler = null;
 
-    // Segmenter state
-    this.speaking = false;
-    this.frames = [];
-    this.preroll = [];
-    this.prerollSamples = 0;
-    this.voicedMs = 0;
-    this.silentMs = 0;
-    this.utteranceMs = 0;
-    this.noiseFloor = 0.01;
-    this.pttActive = false;
+    this.#resetSegmenter();
   }
 
   get isRunning() {
     return this.ctx !== null;
   }
 
-  /** Request the mic and build the audio graph. Resolves once frames are flowing. */
   async start() {
     if (this.ctx) return;
 
@@ -102,7 +103,6 @@ export class Recorder {
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
-          // Let the browser do the boring parts well.
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
@@ -114,10 +114,10 @@ export class Recorder {
       throw err;
     }
 
-    // Ask for 16 kHz directly. Where the browser honours it we skip resampling
-    // altogether; where it does not, wav.js resamples on the way out.
+    // Ask for 16 kHz directly. Where the browser honours it there is no
+    // resampling at all, which is one less thing between the mic and the wire.
     try {
-      this.ctx = new AudioContext({ sampleRate: 16000, latencyHint: "interactive" });
+      this.ctx = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE, latencyHint: "interactive" });
     } catch {
       this.ctx = new AudioContext({ latencyHint: "interactive" });
     }
@@ -131,9 +131,8 @@ export class Recorder {
     this.#setState(RecorderState.LISTENING);
   }
 
-  /** Tear down the graph and release the mic indicator. */
   async stop() {
-    if (this.speaking) this.#flush("stop");
+    if (this.speaking) this.#close("stop");
     if (this.node) {
       try {
         this.node.disconnect();
@@ -165,38 +164,26 @@ export class Recorder {
 
   setMode(mode) {
     if (mode !== "vad" && mode !== "ptt") return;
-    if (this.speaking) this.#flush("mode-change");
+    if (this.speaking) this.#close("mode-change");
     this.mode = mode;
     this.#resetSegmenter();
   }
 
-  /** Push-to-talk: begin capturing regardless of energy. */
   pttDown() {
-    if (this.mode !== "ptt" || !this.ctx) return;
-    this.pttActive = true;
-    this.speaking = true;
-    this.utteranceMs = 0;
-    // Seed with pre-roll so the key press does not clip the first word.
-    this.frames = this.preroll.slice();
-    this.preroll = [];
-    this.prerollSamples = 0;
-    this.#setState(RecorderState.SPEAKING);
+    if (this.mode !== "ptt" || !this.ctx || this.speaking) return;
+    this.#open();
   }
 
-  /** Push-to-talk released: flush whatever was captured. */
   pttUp() {
-    if (this.mode !== "ptt" || !this.pttActive) return;
-    this.pttActive = false;
-    this.#flush("ptt");
+    if (this.mode !== "ptt" || !this.speaking) return;
+    this.#close("ptt");
     this.#setState(RecorderState.LISTENING);
   }
 
   // -------------------------------------------------------------------------
-  // Internals
-  // -------------------------------------------------------------------------
 
   async #buildCaptureNode() {
-    const frameHandler = (frame) => this.#onFrame(frame);
+    const handle = (frame) => this.#onFrame(frame);
 
     if (this.ctx.audioWorklet) {
       try {
@@ -206,7 +193,7 @@ export class Recorder {
           numberOfOutputs: 0,
           channelCount: 1,
         });
-        node.port.onmessage = (event) => frameHandler(event.data);
+        node.port.onmessage = (event) => handle(event.data);
         this.source.connect(node);
         this.node = node;
         return;
@@ -215,13 +202,12 @@ export class Recorder {
       }
     }
 
-    // Fallback for older browsers. Deprecated but universally present.
     const node = this.ctx.createScriptProcessor(1024, 1, 1);
     node.onaudioprocess = (event) => {
-      frameHandler(new Float32Array(event.inputBuffer.getChannelData(0)));
+      handle(new Float32Array(event.inputBuffer.getChannelData(0)));
     };
     this.source.connect(node);
-    // ScriptProcessor only fires while connected to a destination; a zero gain
+    // ScriptProcessor only fires while connected to a destination; a muted gain
     // node keeps it alive without monitoring the mic back through the speakers.
     const mute = this.ctx.createGain();
     mute.gain.value = 0;
@@ -239,39 +225,17 @@ export class Recorder {
       this.opts.minThreshold,
     );
     const releaseThreshold = onsetThreshold * this.opts.releaseRatio;
-
     this.onLevel(level, onsetThreshold);
 
-    // Push-to-talk: no energy gating at all, just accumulate while held.
-    if (this.mode === "ptt") {
-      if (this.pttActive) {
-        this.frames.push(frame);
-        this.utteranceMs += frameMs;
-        if (this.utteranceMs >= this.opts.maxUtteranceMs) this.#flush("max-length");
-      } else {
-        this.#pushPreroll(frame);
-        // Keep the floor current so the meter reads sensibly.
-        this.noiseFloor = this.noiseFloor * 0.95 + level * 0.05;
-      }
-      return;
-    }
-
     if (!this.speaking) {
-      // Track ambient level while idle.
       this.noiseFloor = this.noiseFloor * 0.95 + level * 0.05;
       this.#pushPreroll(frame);
 
+      if (this.mode === "ptt") return; // opening is driven by the key, not energy
+
       if (level > onsetThreshold) {
         this.voicedMs += frameMs;
-        if (this.voicedMs >= this.opts.onsetMs) {
-          this.speaking = true;
-          this.silentMs = 0;
-          this.utteranceMs = 0;
-          this.frames = this.preroll.slice(); // pre-roll becomes the head of the clip
-          this.preroll = [];
-          this.prerollSamples = 0;
-          this.#setState(RecorderState.SPEAKING);
-        }
+        if (this.voicedMs >= this.opts.onsetMs) this.#open();
       } else {
         this.voicedMs = 0;
       }
@@ -279,28 +243,113 @@ export class Recorder {
     }
 
     // Mid-utterance.
-    this.frames.push(frame);
+    this.#accumulate(frame);
     this.utteranceMs += frameMs;
 
-    if (level > releaseThreshold) {
-      this.silentMs = 0;
-    } else {
-      this.silentMs += frameMs;
-      if (this.silentMs >= this.opts.hangoverMs) {
-        this.#flush("pause");
-        this.#setState(RecorderState.LISTENING);
-        return;
+    if (this.mode === "vad") {
+      if (level > releaseThreshold) {
+        this.silentMs = 0;
+      } else {
+        this.silentMs += frameMs;
+        if (this.silentMs >= this.opts.hangoverMs) {
+          this.#close("pause");
+          this.#setState(RecorderState.LISTENING);
+          return;
+        }
       }
     }
 
     if (this.utteranceMs >= this.opts.maxUtteranceMs) {
-      this.#flush("max-length");
-      // Stay in SPEAKING: the person is mid-sentence, we just cut the clip.
-      this.speaking = true;
-      this.frames = [];
-      this.utteranceMs = 0;
-      this.silentMs = 0;
+      this.#close("max-length");
+      // The person is mid-sentence; start a fresh utterance immediately.
+      this.#open();
     }
+  }
+
+  /** Open an utterance: flush pre-roll first, then tell the app to start the upload. */
+  #open() {
+    this.speaking = true;
+    this.silentMs = 0;
+    this.voicedMs = 0;
+    this.utteranceMs = 0;
+    this.pendingSamples = 0;
+    this.wavFrames = [];
+    this.sentSamples = 0;
+    this.resampler = new StreamingResampler(this.sampleRate, TARGET_SAMPLE_RATE);
+    this.openedAt = performance.now();
+
+    this.onSpeechStart();
+    this.#setState(RecorderState.SPEAKING);
+
+    // The pre-roll is the head of the clip and must go up before live frames.
+    const preroll = this.preroll;
+    this.preroll = [];
+    this.prerollSamples = 0;
+    for (const frame of preroll) this.#accumulate(frame, true);
+    this.#flush(true);
+  }
+
+  #accumulate(frame, prerollOnly = false) {
+    if (this.keepWav) this.wavFrames.push(frame);
+    const resampled = this.resampler.push(frame);
+    if (resampled.length) {
+      this.chunkBuffer.push(resampled);
+      this.pendingSamples += resampled.length;
+    }
+    if (!prerollOnly) this.#flush(false);
+  }
+
+  /** Send accumulated PCM once we have about `chunkMs` worth. */
+  #flush(force) {
+    const targetSamples = (this.opts.chunkMs / 1000) * TARGET_SAMPLE_RATE;
+    if (!force && this.pendingSamples < targetSamples) return;
+    if (!this.pendingSamples) return;
+
+    let total = 0;
+    for (const part of this.chunkBuffer) total += part.length;
+    const joined = new Float32Array(total);
+    let offset = 0;
+    for (const part of this.chunkBuffer) {
+      joined.set(part, offset);
+      offset += part.length;
+    }
+    this.chunkBuffer = [];
+    this.pendingSamples = 0;
+    this.sentSamples += joined.length;
+
+    this.onAudio(floatToPcmBytes(joined));
+  }
+
+  #close(trigger) {
+    if (!this.speaking) return;
+    this.speaking = false;
+
+    // Anything the resampler is still holding belongs to this utterance.
+    const tail = this.resampler ? this.resampler.flush() : new Float32Array(0);
+    if (tail.length) {
+      this.chunkBuffer.push(tail);
+      this.pendingSamples += tail.length;
+    }
+    this.#flush(true);
+
+    const durationMs = (this.sentSamples / TARGET_SAMPLE_RATE) * 1000;
+    const wav = this.keepWav && this.wavFrames.length
+      ? framesToWav(this.wavFrames, this.sampleRate)
+      : null;
+
+    this.wavFrames = [];
+    this.voicedMs = 0;
+    this.silentMs = 0;
+    this.utteranceMs = 0;
+
+    this.onSpeechEnd({
+      trigger,
+      durationMs,
+      sampleCount: this.sentSamples,
+      tooShort: durationMs < this.opts.minUtteranceMs,
+      wav,
+      heldMs: performance.now() - this.openedAt,
+    });
   }
 
   #pushPreroll(frame) {
@@ -312,49 +361,20 @@ export class Recorder {
     }
   }
 
-  #flush(trigger) {
-    const frames = this.frames;
-    this.frames = [];
-    this.speaking = false;
-    this.voicedMs = 0;
-    this.silentMs = 0;
-    const capturedMs = this.utteranceMs;
-    this.utteranceMs = 0;
-
-    if (!frames.length) return;
-
-    // Trailing hangover silence is dead weight in the upload; trim most of it.
-    const trimmed = this.#trimTrailingSilence(frames, trigger);
-    const result = framesToWav(trimmed, this.sampleRate);
-
-    if (result.durationMs < this.opts.minUtteranceMs) return;
-
-    this.onUtterance({ ...result, trigger, capturedMs });
-  }
-
-  #trimTrailingSilence(frames, trigger) {
-    if (trigger !== "pause") return frames;
-    // Keep 150 ms of the hangover as natural decay, drop the rest.
-    const keepMs = Math.max(0, this.opts.hangoverMs - 150);
-    const dropSamples = (keepMs / 1000) * this.sampleRate;
-    let dropped = 0;
-    const out = frames.slice();
-    while (out.length > 1 && dropped + out[out.length - 1].length <= dropSamples) {
-      dropped += out.pop().length;
-    }
-    return out;
-  }
-
   #resetSegmenter() {
     this.speaking = false;
-    this.pttActive = false;
-    this.frames = [];
     this.preroll = [];
     this.prerollSamples = 0;
+    this.chunkBuffer = [];
+    this.pendingSamples = 0;
+    this.wavFrames = [];
+    this.sentSamples = 0;
     this.voicedMs = 0;
     this.silentMs = 0;
     this.utteranceMs = 0;
     this.noiseFloor = 0.01;
+    this.resampler = null;
+    this.openedAt = 0;
   }
 
   #setState(state, detail) {

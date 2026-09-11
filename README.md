@@ -2,10 +2,10 @@
 
 **Dictate the prose. Speak the formatting.**
 
-A voice-native markdown editor built on the AssemblyAI Sync (Dictation) API. You
-talk; structured markdown appears. Say "heading two" and you get a heading. Say
-"bullet list" and you get a list. Say "scratch that" and the last thing you said
-disappears. No keyboard, no toolbar, no mouse.
+A voice-native markdown editor built on the [AssemblyAI Dictation API](https://www.assemblyai.com/docs/dictation).
+You talk; structured markdown appears. Say "heading two" and you get a heading.
+Say "bullet list" and you get a list. Say "scratch that" and the last thing you
+said disappears. No keyboard, no toolbar, no mouse.
 
 ![Speakdown](docs/screenshot.png)
 
@@ -24,7 +24,7 @@ That is the whole setup. **Zero npm dependencies** — no `npm install`, no
 lockfile, no build step. Node 20 or newer is the only requirement.
 
 Open <http://localhost:3000>. With no API key it starts in **Demo Mode** and
-replays a scripted dictation with realistic latencies, so you can see the entire
+replays a scripted dictation with realistic timings, so you can see the entire
 editor work without a key or a microphone. Press *Play demo*.
 
 For real dictation:
@@ -34,61 +34,95 @@ cp .env.example .env     # then paste your key into ASSEMBLYAI_API_KEY
 node server/index.js
 ```
 
-Press the mic and talk. Chrome, Edge, Firefox and Safari 14.1+ all work;
-`localhost` counts as a secure context, so microphone access is granted normally.
+`localhost` counts as a secure context, so the microphone prompt appears
+normally — no HTTPS or tunnel needed.
 
 ```bash
-npm test                 # 126 tests, no dependencies, ~0.6s
+npm test                 # 140 tests, no dependencies, ~1s
 ```
 
 ---
 
-## How it works
+## The idea
+
+Most integrations treat a dictation endpoint as "record a clip, upload it, wait".
+This one does not, because of a line in the API docs that changes the whole
+shape of the problem:
+
+> The endpoint transcribes the audio it has while the rest is still arriving.
+
+So Speakdown opens the HTTP request the *instant* the voice-activity detector
+hears you start, and pushes PCM up as the microphone produces it. Transcription
+happens **while you are still talking**. When you stop, the only thing left to
+process is the tail.
 
 ```
   microphone
       │
       ▼
-  AudioWorklet ──► Float32 frames (raw, on the audio render thread)
+  AudioWorklet ──► Float32 frames on the audio render thread
       │
       ▼
-  voice-activity segmenter ──► one clip per utterance (+300 ms pre-roll)
+  VAD detects speech onset ──────────► POST /api/dictate/start
+      │                                  └─ upstream request opens NOW,
+      ▼                                     config part already sent
+  PCM every ~120 ms ─────────────────► POST /api/dictate/chunk  ×N
+      │                                  └─ spliced into the open upstream body
+      ▼
+  VAD detects ~700 ms silence ───────► POST /api/dictate/end
+                                         └─ body closes, transcript returns
       │
       ▼
-  WAV encoder ──────────────► 16 kHz mono 16-bit PCM
-      │
-      ▼
-  POST /api/transcribe ─────► local proxy attaches the API key
-      │
-      ▼
-  sync.assemblyai.com/transcribe  (one HTTP round trip, ~180 ms observed)
-      │
-      ▼
-  filler removal ──► command parser ──► document model ──► markdown + preview
+  pick cleaned or verbatim ──► parse commands ──► document ──► markdown + preview
 ```
 
-The interesting problem here is not streaming. The Sync endpoint takes a clip
-and returns a finished transcript in one request — no WebSocket, no polling, no
-job to manage. The interesting problem is deciding **where one utterance ends**,
-and making a spoken command land in the document as structure rather than as the
-words "heading two".
+The dock shows **wait after speech** rather than total round trip, because that
+is the number a person actually feels. Switch *Upload* to "Buffer, then send" in
+Settings and watch it climb — that control is the A/B test for this whole idea.
 
-### The three accuracy levers
+### Why the browser doesn't stream directly
 
-Speakdown uses every accuracy option the Sync API offers, and the first one is
-what makes the whole concept viable:
+It can't. Chrome allows a streamed `fetch` request body only over HTTP/2; a
+local dev server is HTTP/1.1, and the attempt fails with
+`ERR_ALPN_NEGOTIATION_FAILED`. Firefox and Safari don't support request
+streaming at all. (I tested this rather than assuming it.)
+
+So the browser posts each ~120 ms of PCM as its own small request to the local
+server, and the server feeds those frames into one long-lived upstream request.
+The hop to localhost costs microseconds; the hop that matters — your machine to
+AssemblyAI — is a genuine chunked upload. It works in every browser, needs no
+TLS certificate, and keeps the dependency count at zero.
+
+Raw PCM (`audio/pcm`) is used for the streaming path rather than WAV, because a
+container header has a length field that can't be filled in until the clip is
+finished. Without a container there is nothing to backfill, so frames leave the
+moment they exist.
+
+---
+
+## Using the API properly
 
 | Config field | What Speakdown sends | Why |
 |---|---|---|
-| `keyterms_prompt` | All 29 command phrases, on every request | Without it, "heading two" transcribes as "heading too" and "block quote" as "black quote". The parser then never sees a command. This single parameter is the difference between a working product and a party trick. |
-| `prompt` | A description of the audio as markdown dictation with spoken formatting commands | Biases the model towards the command register and document prose. |
-| `conversation_context` | A rolling window of the last 8 utterances of **prose only** | Keeps proper nouns and terminology consistent across a document instead of treating every clip as a cold start. Commands are deliberately excluded — feeding them back would teach the model to expect formatting words where they do not belong. |
+| `keyterms_prompt` | All 29 command phrases, every request | Without it, "heading two" transcribes as "heading too" and "block quote" as "black quote", and the parser never sees a command. This one parameter is the difference between a working product and a party trick. |
+| `stt_prompt` | A description of the situation — someone dictating a document and speaking its formatting aloud | The docs are explicit that this field *describes* rather than instructs, so it is written that way. Pinning exact wording is `keyterms_prompt`'s job. |
+| `llm_instruction` | **Omitted by default** | Omitting it keeps AssemblyAI's default cleanup, which removes disfluencies and leaves every other word exactly as spoken. That is precisely what a dictation editor wants. It's exposed in Settings for anyone who wants to replace that task. |
 
-Per-word confidences from the response drive the **confidence heatmap**: words
-the model was unsure about get a dotted amber underline in the source pane, so
-you know where to look when proof-reading. It is a per-term minimum across the
-document, not a per-occurrence record — that is the question you actually want
-answered when checking dictated text.
+The response carries both texts: `text` is verbatim and never touched by the
+LLM, `llm_response` is the rewrite. Speakdown keeps **every** transcript and the
+**Cleaned / Verbatim** toggle rebuilds the whole document by replaying the log
+through the same deterministic pipeline — so switching views is an exact
+reconstruction, not an edit applied after the fact. The Activity panel word-diffs
+the two and shows you exactly what the rewrite removed.
+
+Rewrites are best-effort. A `null` `llm_response` with a non-null `llm_error`
+is still a successful transcription, so Speakdown falls back to `text` and says
+so in a toast rather than dropping the utterance.
+
+Per-word confidences drive the **confidence heatmap**: words the model was
+unsure about get a dotted amber underline in the source pane. It is a per-term
+minimum across the document, not a per-occurrence record — that is the question
+you actually want answered when proof-reading dictation.
 
 ---
 
@@ -118,14 +152,12 @@ has to be predictable.
 | "bring that back" | Re-applies what you scratched |
 | "stop dictation" | Hands the mic back |
 
-Spoken punctuation ("comma", "full stop", "open quote") is available but **off by
-default**, because the model already punctuates prose well and doubling up makes
-a mess. Turn it on in Settings.
+Spoken punctuation ("comma", "full stop", "open quote") is available but off by
+default, because the model already punctuates prose and doubling up makes a mess.
 
 ### Where commands are allowed to match
 
-Every phrase carries an anchor, and this is the part that took the most
-iteration:
+Every phrase carries an anchor, and this took the most iteration:
 
 - **anywhere** — "new paragraph", "scratch that". Distinctive enough to be safe,
   and people genuinely tack these on mid-flow.
@@ -136,168 +168,173 @@ iteration:
 Headings earn the tightest anchor because of a sentence in this project's own
 demo script: *"so heading two comes back as those two words, not heading too"*.
 A naive parser turns that into a heading mid-sentence and shreds the paragraph.
-Dictating a document *about* dictation is exactly when this bites. In practice
-you always pause before a heading anyway, which starts a new utterance.
+Dictating a document *about* dictation is exactly when this bites.
 
 Separately, short phrases that occur in ordinary prose — "heading", "quote",
 "bold", "comma" — are marked strict, forcing at least boundary anchoring.
-Without that, "the quote was misattributed to him" silently becomes a
-blockquote.
+Without it, "the quote was misattributed to him" silently becomes a blockquote.
 
 **"Strike that" means delete, not strikethrough.** That has been the dictation
-convention for fifty years, and getting it backwards would be destructive. Say
+convention for fifty years and getting it backwards would be destructive. Say
 "strikethrough that" for `~~text~~`.
 
 ---
 
 ## Decisions worth explaining
 
-**The browser will not give you 16-bit audio.** The Sync API accepts "WAV or raw
-PCM S16LE — 16-bit only". `MediaRecorder`, the obvious API, produces webm/opus,
-which the endpoint rejects. So Speakdown captures raw Float32 frames through an
-`AudioWorklet`, resamples to 16 kHz, converts to Int16 and writes the 44-byte
-RIFF header itself. This is where a naive integration breaks, so it lives in one
-small module ([`public/js/wav.js`](public/js/wav.js)) with its own tests —
-including that out-of-range samples clamp rather than wrap, which is an easy way
-to turn quiet speech into loud static.
+**The browser will not give you 16-bit audio.** The endpoint takes `audio/wav`
+or `audio/pcm` and rejects compressed formats with a 415. `MediaRecorder`, the
+obvious API, produces webm/opus. So Speakdown captures raw Float32 frames through
+an `AudioWorklet`, resamples to 16 kHz, and produces either raw PCM bytes or a
+44-byte RIFF header itself. This is where a naive integration breaks, so it lives
+in one small module with its own tests — including that out-of-range samples
+clamp rather than wrap, which is an easy way to turn quiet speech into static.
 
-Downsampling uses block averaging for integer ratios (48 kHz → 16 kHz, the
-common case) rather than naive decimation. Dropping samples without a low-pass
-filter aliases high frequencies down into the speech band and measurably hurts
-accuracy.
+**Streaming needs a resampler that remembers.** 128-sample frames at 48 kHz do
+not divide evenly by three, so a per-frame block-average silently drops up to two
+samples every frame. At 8 ms a frame that is a steady, accumulating drift over a
+long utterance. `StreamingResampler` carries the remainder across calls, and a
+test asserts it produces bit-identical output to the one-shot resampler.
 
-**Requests are concurrent; application is ordered.** Speaking three sentences in
-a row puts three requests in flight at once, because waiting for each response
-before sending the next would make dictation feel like a walkie-talkie. But they
-are *applied* strictly in the order they were spoken, via a sequence number and
-a pending map. Without that, a fast short clip overtakes a slow long one and the
-document comes out scrambled. This is the single most likely way a dictation app
-built on a synchronous endpoint goes wrong, and it only shows up when you talk
-quickly.
+**Audio arrives before the session exists.** Opening the upstream request is a
+round trip, however short, and the microphone does not wait for it. Frames
+captured in that window are buffered and flushed the moment the session id lands.
+Dropping them would clip the first word of every utterance and undo the whole
+point of the pre-roll.
 
 **300 ms of pre-roll.** The segmenter retains audio from *before* speech was
-detected. Without it every utterance loses its first consonant and "bullet list"
-arrives as "ullet list". Voice activity detection also uses an adaptive noise
-floor (a fixed threshold works in a quiet room and fails next to a laptop fan)
-and hysteresis, so a dip mid-word does not split one utterance into two. The
-meter in the dock draws the live threshold, which makes the segmenter's decisions
+detected and sends it as the first chunk. Without it every utterance loses its
+first consonant and "bullet list" arrives as "ullet list". The VAD also uses an
+adaptive noise floor (a fixed threshold works in a quiet room and fails next to a
+laptop fan) and hysteresis, so a dip mid-word does not split one utterance in two.
+The dock meter draws the live threshold, which makes the segmenter's decisions
 visible when a room is behaving badly.
 
+**Utterances are applied in spoken order.** They overlap — you start the next
+sentence before the last transcript returns — so a sequence number and a pending
+map keep the document in the order the words were said. Without it a fast short
+clip overtakes a slow long one and the document comes out scrambled.
+
 **One undo snapshot per utterance.** "Scratch that" should undo the last thing
-you *said*, not the last internal operation, regardless of how many commands
-that utterance contained. A pure-edit utterance deliberately does not snapshot
-first — otherwise the undo pops the snapshot just pushed and nothing appears to
-happen.
+you *said*, regardless of how many commands that utterance contained. A pure-edit
+utterance deliberately does not snapshot first — otherwise the undo pops the
+snapshot just pushed and nothing appears to happen.
 
-**Headings are single-line.** Once a heading has its text, the next utterance
-opens a paragraph. Without this, "heading two, what this is" followed by a
-sentence produces one enormous heading containing the whole paragraph.
+**404 means a bad key, not a bad URL.** This endpoint returns 404 for an invalid
+API key. Reporting that as "not found" would send you hunting for a wrong URL
+instead of a wrong key, so it is mapped to a fatal auth error that stops
+dictation and says so plainly.
 
-**The API key never reaches the browser.** The tiny Node proxy holds it and
-builds the multipart request upstream. It also validates the WAV header locally
-and rejects clips outside the documented 80 ms – 120 s range before spending a
-request on a call that would fail.
+**The API key never reaches the browser.** The Node proxy holds it, assembles the
+multipart body by hand — `config` first, then `audio`, because the server cannot
+start transcribing without the config and rejects the wrong order with a 400 —
+and drops any config field the docs don't document rather than forwarding it.
 
 ---
 
 ## Notes on the Dictation API
 
-Written up honestly, including what did not work.
+Written up honestly, including what I got wrong.
 
-**What is genuinely good.** One request, one transcript, no state to manage — for
-dictation this is simply the right shape, and it removes an entire class of
-reconnect and partial-result bugs that a streaming integration has to handle.
-Observed round trips in this project ran roughly 150–220 ms end to end from a UK
-connection, of which about 110–180 ms was `request_time_ms`. Having the server's
-own processing time in the response is a small thing that saved real debugging
-effort — it tells you immediately whether a slow request was the model or the
-network. `keyterms_prompt` made a large, obvious difference to command
-recognition; it is the reason this project works at all.
+**What is genuinely good.** The streaming upload is the standout: one ordinary
+HTTP request that happens to transcribe as it reads, with no WebSocket, no
+session lifecycle, and no partial-result reconciliation. It removes an entire
+class of bugs that a streaming integration normally has to handle, and the
+latency win is real and visible. `keyterms_prompt` made a large, obvious
+difference to command recognition; it is the reason this project works at all.
+Returning both `text` and `llm_response` rather than only the rewrite is the
+right call — it makes the rewrite auditable, which is what let me build the
+Cleaned/Verbatim toggle at all. And splitting `request_time_ms` from
+`sync_time_ms` means you can see the rewrite's cost separately from
+transcription without instrumenting anything.
 
-**Three things I would flag as feedback:**
+**Feedback:**
 
-1. *The hackathon brief says filler words are "auto-removed for clean output".*
-   The Sync API reference documents no such option, and transcripts come back
-   with "um", "uh" and "you know" intact. Speakdown strips them client-side
-   instead and counts what it removed. Either the docs are missing a feature or
-   the announcement is describing one that is not there.
+1. *`/v1/transcribe/live` is hard to find from outside the docs page.* Searching
+   for the Dictation API surfaces the Sync STT product first, whose endpoint
+   (`sync.assemblyai.com/transcribe`) has a similar shape and a similar
+   `keyterms_prompt`. I built an entire first version against the wrong service
+   before catching it. The docs note that `/v1/transcribe/stream` still reaches
+   the same handler and there is no unversioned alias — that is exactly the
+   right kind of note, and more cross-linking from the Sync docs saying "if you
+   want dictation, you want this other host" would have saved me a day.
 
-2. *The brief says 18 languages; the API reference lists 19 language codes*
-   (en, es, de, fr, it, pt, nl, tr, sv, no, da, fi, hi, vi, ar, he, ja, ur, zh).
-   Minor, but it is the kind of thing that makes a developer second-guess which
-   document is current.
+2. *The "uploading while recording" section deserves to be much louder.* It is
+   the single most valuable property of this API and it is three quarters of the
+   way down the page, under a heading that reads like an optional optimisation.
+   It isn't — it changes the architecture of anything built on it.
 
-3. *No speaker diarization on this endpoint.* Expected for a dictation API, and
-   correct for the use case — but worth stating plainly in the Sync docs, because
-   `speaker_labels` exists on the pre-recorded endpoint and the natural
-   assumption is that it carries over.
+3. *A browser-side note would help.* The natural way to stream from a browser is
+   `fetch` with a `ReadableStream` body, which silently requires HTTP/2 and is
+   Chrome-only. Worth one line in the docs, since "call it over HTTP" implies a
+   browser can do this directly and it can't without a proxy in front.
 
-**One documentation gap:** a `/warm` endpoint is described in AssemblyAI's own
-blog post about this API as a way to pre-establish the TLS connection when the
-user presses record, but it does not appear in the API reference. Speakdown does
-not call it, because I could not verify it from the documentation. If it is
-supported it belongs in the reference, since connection setup is a meaningful
-slice of perceived latency for short clips.
+4. *One small inconsistency:* the hackathon announcement says 18 supported
+   languages; the docs list 19 codes (en, es, de, fr, it, pt, tr, nl, sv, no, da,
+   fi, hi, vi, ar, he, ja, ur, zh).
 
 ---
 
 ## Limitations
 
-Stated plainly, because a demo that hides these is not much use to anyone.
+Stated plainly, because a demo that hides these is not much use.
 
-The voice command grammar is English-only. The transcription works in all 19
+The voice command grammar is English-only. Transcription works in all 19
 supported languages and you can dictate prose in any of them, but the command
-phrases are English words. Localising the grammar is a per-language table, not a
-rewrite, but it is not done.
+phrases are English words. Localising is a per-language table, not a rewrite, but
+it is not done.
 
 Nested structure is not supported. The document model is a flat list of blocks,
 because every nesting scheme I tried made spoken commands ambiguous — a bullet
-list inside a quote inside a list gives "bullet list" three possible meanings.
-Consecutive list items are grouped at serialisation time, which produces correct
-markdown without the model needing to represent a tree.
+list inside a quote inside a list gives "bullet list" three meanings. Consecutive
+list items are grouped at serialisation time, which produces correct markdown
+without the model needing a tree.
 
 The confidence heatmap is per-term, not per-occurrence. If a word appears three
 times and the model was unsure once, all three are underlined.
 
-Spoken punctuation and filler removal are heuristics operating on text, not
-audio. "Aggressive" filler removal will occasionally delete a meaningful
-"actually", which is exactly why it is not the default.
+Streaming saves less on very short utterances than on long ones — there is
+simply less uploaded-but-unprocessed audio to overlap with. The docs say this
+too. On two-second clips the win is small; on fifteen-second ones it is obvious.
 
-Very long single utterances are cut at 20 seconds, well below the API's 120 s
-ceiling. You lose nothing — the clip is sent and a new one starts — but a
-sentence can be split across two requests, and the join is not always perfect.
+Hand-editing the source pane discards the transcript log, so the Cleaned/Verbatim
+toggle stops working for that document. The alternative was letting a later
+toggle silently revert your edit, which is worse.
 
 Utterance segmentation is tuned for a reasonably quiet room with a close
-microphone. It degrades in a noisy open-plan office, which is a limitation of
-energy-based voice activity detection rather than of the API.
+microphone. It degrades in a noisy open-plan office — a limitation of
+energy-based voice activity detection, not of the API.
 
 ---
 
 ## Layout
 
 ```
-server/index.js           HTTP server, static files, API proxy, WAV validation
-public/index.html         The editor shell
-public/css/app.css        All styling
-public/js/
-  app.js                  Wiring, ordered concurrency, UI state, level meter
-  recorder.js             Microphone capture and voice-activity segmentation
-  wav.js                  Resampling, Int16 conversion, RIFF encoding
-  capture-worklet.js      AudioWorklet processor (audio render thread)
-  dictation.js            Live API client + scripted demo client
-  commands.js             The voice command grammar and keyterm vocabulary
-  pipeline.js             Transcript -> document (DOM-free, fully tested)
-  doc.js                  Block document model, undo, markdown serialisation
-  text.js                 Filler removal, fragment joining, emphasis wrapping
-  markdown.js             Markdown renderer and source highlighter
-test/                     126 tests across all of the above
+server/
+  index.js              HTTP server, static files, streaming session bridge
+  dictation-api.js      The Dictation API client — multipart assembly, errors
+public/
+  index.html            The editor shell
+  css/app.css           All styling
+  js/
+    app.js              Wiring, utterance lifecycle, ordered application, meter
+    recorder.js         Microphone capture and voice-activity segmentation
+    wav.js              Resampling, Int16 conversion, PCM bytes, RIFF encoding
+    capture-worklet.js  AudioWorklet processor (audio render thread)
+    dictation.js        Live client + per-utterance handles + scripted demo
+    commands.js         The voice command grammar and keyterm vocabulary
+    pipeline.js         Transcript -> document (DOM-free, fully tested)
+    doc.js              Block document model, undo, markdown serialisation
+    text.js             Filler removal, fragment joining, emphasis wrapping
+    markdown.js         Markdown renderer and source highlighter
+test/                   140 tests across all of the above
 ```
 
-The pipeline lives apart from `app.js` deliberately: it holds all the
-interesting behaviour, and keeping it free of DOM access means the test suite
-exercises the real code rather than a reimplementation of it. The end-to-end
-test runs the entire demo script through the real pipeline and asserts on the
-resulting markdown.
+The pipeline lives apart from `app.js` deliberately: it holds all the interesting
+behaviour, and keeping it free of DOM access means the test suite exercises the
+real code rather than a reimplementation. The server tests run the real client
+against a stand-in upstream that records exactly what it received, so the
+multipart ordering and the streaming behaviour are asserted rather than assumed.
 
 ---
 

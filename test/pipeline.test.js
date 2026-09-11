@@ -174,16 +174,19 @@ test("empty and whitespace transcripts are no-ops", () => {
 
 test("the full demo script produces a well-formed document", () => {
   // The end-to-end check: every scripted utterance through the real pipeline.
-  const { markdown, doc } = dictate(DEMO_SCRIPT);
+  // The demo entries carry both texts; the cleaned one is what the editor uses.
+  const cleaned = DEMO_SCRIPT.map((entry) => entry.llm_response ?? entry.text);
+  const { markdown, doc } = dictate(cleaned, { fillerLevel: "off" });
 
   assert.match(markdown, /^# Speakdown field notes/m);
   assert.match(markdown, /^## What this is/m);
-  assert.match(markdown, /^- Every command phrase is pushed/m);
-  assert.match(markdown, /^> Filler removal happens in this client/m);
+  assert.match(markdown, /^## Uploading while you speak/m);
+  assert.match(markdown, /^- Every command phrase goes into keyterms prompt/m);
+  assert.match(markdown, /^> The rewrite is on by default/m);
   assert.match(markdown, /^- \[ \] Record the demo video/m);
   assert.match(markdown, /^---$/m);
   assert.match(markdown, /```\nnode server slash index dot js\n```/);
-  assert.match(markdown, /\*\*that is the part everyone gets wrong\*\*/i);
+  assert.match(markdown, /\*\*when you stop talking[^*]*tail\*\*/i);
 
   // The script ends with a mistake and a "scratch that" — the mistake must be gone.
   assert.doesNotMatch(markdown, /This last sentence is a mistake/);
@@ -207,5 +210,9 @@ test("the full demo script produces a well-formed document", () => {
   assert.equal(leaked, undefined, `command phrase leaked as block content: ${leaked}`);
 
   assert.ok(doc.stats.commands > 12, `expected a dozen-plus commands, got ${doc.stats.commands}`);
-  assert.ok(doc.stats.fillersRemoved >= 2, `expected fillers removed, got ${doc.stats.fillersRemoved}`);
+  // Disfluencies are gone because the API's rewrite removed them, not because
+  // the local stripper ran — it is off here, as it is by default.
+  assert.doesNotMatch(markdown, /\bum\b/i);
+  assert.doesNotMatch(markdown, /\buh\b/i);
+  assert.equal(doc.stats.fillersRemoved, 0);
 });

@@ -17,7 +17,7 @@ import { parseUtterance } from "./commands.js";
  * @property {Array} commands          Commands that fired.
  * @property {number} removed          Fillers stripped.
  * @property {boolean} appliedText     Whether any prose reached the document.
- * @property {string} prose            The prose portion, for conversation_context.
+ * @property {string} prose            The prose portion, commands stripped out.
  * @property {string[]} warnings       Non-fatal problems worth surfacing.
  * @property {string|null} control     A control command the caller must act on.
  */
@@ -109,8 +109,9 @@ export function applyTranscript(doc, rawText, options = {}) {
   doc.stats.fillersRemoved += removed;
   doc.stats.utterances++;
 
-  // Only prose feeds conversation_context. Sending the commands back would
-  // teach the model to expect formatting words where they do not belong.
+  // The prose with command phrases removed. Reported separately because a
+  // caller wants the words that became document content, not the words that
+  // became structure.
   report.prose = segments
     .filter((s) => s.type === "text")
     .map((s) => s.text)

@@ -1179,3 +1179,114 @@ textarea {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ── Segmented control (Cleaned / Verbatim) ─────────────────────────────── */
+
+.segmented {
+  display: inline-flex;
+  background: #0f1116;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 2px;
+  gap: 2px;
+}
+
+.seg {
+  border: 0;
+  background: none;
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 560;
+  padding: 2px 9px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: background 0.14s, color 0.14s;
+}
+
+.seg:hover {
+  color: var(--text-dim);
+}
+
+.seg.is-active {
+  background: var(--raised);
+  color: var(--text);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+}
+
+/* The verbatim view is the unedited machine output — mark it as such. */
+.app.is-verbatim .source {
+  color: #b9c0cf;
+}
+
+.app.is-verbatim .pane-source .pane-head {
+  box-shadow: inset 0 -2px 0 rgba(245, 181, 68, 0.4);
+}
+
+/* ── Rewrite diff markers ───────────────────────────────────────────────── */
+
+.act-diff {
+  margin: 4px 0 6px;
+  padding: 5px 8px;
+  background: #14171e;
+  border-left: 2px solid var(--warn);
+  border-radius: 0 4px 4px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-faint);
+}
+
+.act-diff del {
+  color: #ff9b9b;
+  text-decoration: line-through;
+  text-decoration-color: rgba(255, 155, 155, 0.6);
+}
+
+.act-diff-label {
+  display: block;
+  font-size: 9.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--warn);
+  margin-bottom: 2px;
+}
+
+.chip-rewrite {
+  color: var(--warn);
+  border-color: rgba(245, 181, 68, 0.32);
+}
+
+.chip-stream {
+  color: #a5b4fc;
+  border-color: rgba(165, 180, 252, 0.32);
+}
+
+/* ── Settings textarea ──────────────────────────────────────────────────── */
+
+.setting textarea {
+  width: 100%;
+  background: var(--raised);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 7px 9px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text);
+  outline: none;
+  resize: vertical;
+  min-height: 54px;
+}
+
+.setting textarea:focus {
+  border-color: rgba(94, 234, 212, 0.4);
+}
+
+.setting-hint em {
+  color: var(--text-dim);
+  font-style: italic;
+}
+
+/* The "sent while talking" stat only means something in streaming mode. */
+.stat-muted .stat-value {
+  color: var(--text-faint);
+}

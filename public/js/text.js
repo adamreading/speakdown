@@ -2,12 +2,17 @@
  * Text hygiene: filler removal and the small joining rules that make dictated
  * fragments read like written prose.
  *
- * A note on filler removal, because the hackathon brief and the docs disagree:
- * the announcement says filler words are "auto-removed for clean output", but
- * the Sync API reference documents no such option, and transcripts come back
- * with disfluencies intact. So Speakdown strips them client-side and counts
- * what it removed — which has the side benefit of being tunable, auditable and
- * visible in the UI, rather than an opaque server-side behaviour.
+ * A note on filler removal. The Dictation API already does this: its rewrite is
+ * on by default and returns an `llm_response` with disfluencies removed and
+ * every other word left exactly as spoken. So Speakdown does NOT strip fillers
+ * by default — doing so would be duplicating work the API does better, with the
+ * model's understanding of context rather than a word list.
+ *
+ * What remains here is an optional extra pass, off unless you turn it on. It is
+ * useful for the discourse markers the default cleanup deliberately keeps
+ * ("basically", "actually", "like"), which are disfluencies in some sentences
+ * and meaningful in others — a judgement the API correctly declines to make for
+ * you, and one you may want to make differently for your own prose.
  */
 
 /** Pure disfluencies. Safe to remove — they carry no meaning in writing. */

@@ -6,10 +6,30 @@ import {
   resample,
   floatToInt16,
   encodeWav,
+  floatToPcmBytes,
+  StreamingResampler,
   rms,
   TARGET_SAMPLE_RATE,
 } from "../public/js/wav.js";
-import { describeWav } from "../server/index.js";
+
+/** Read back a canonical 44-byte RIFF header, so encodeWav can be verified. */
+function readWavHeader(buffer) {
+  const view = new DataView(buffer);
+  const ascii = (o, n) =>
+    String.fromCharCode(...Array.from({ length: n }, (_, i) => view.getUint8(o + i)));
+  if (ascii(0, 4) !== "RIFF" || ascii(8, 4) !== "WAVE") return null;
+  const channels = view.getUint16(22, true);
+  const sampleRate = view.getUint32(24, true);
+  const bitsPerSample = view.getUint16(34, true);
+  const dataBytes = view.getUint32(40, true);
+  return {
+    channels,
+    sampleRate,
+    bitsPerSample,
+    dataBytes,
+    durationMs: (dataBytes / ((bitsPerSample / 8) * channels) / sampleRate) * 1000,
+  };
+}
 
 test("concatFrames joins frames in order", () => {
   const out = concatFrames([
@@ -57,7 +77,7 @@ test("encodeWav writes a header the server can parse back", () => {
 
   assert.equal(buffer.byteLength, 44 + 16000 * 2);
 
-  const described = describeWav(Buffer.from(buffer));
+  const described = readWavHeader(buffer);
   assert.ok(described, "header should be parseable");
   assert.equal(described.sampleRate, 16000);
   assert.equal(described.channels, 1);
@@ -74,9 +94,57 @@ test("encodeWav round-trips sample values little-endian", () => {
   assert.equal(view.getInt16(50, true), 32767);
 });
 
-test("describeWav rejects non-WAV input", () => {
-  assert.equal(describeWav(Buffer.from("not audio at all, not even close")), null);
-  assert.equal(describeWav(Buffer.alloc(10)), null);
+test("floatToPcmBytes produces little-endian 16-bit bytes", () => {
+  const bytes = floatToPcmBytes(new Float32Array([0, 1, -1]));
+  assert.equal(bytes.length, 6);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  assert.equal(view.getInt16(0, true), 0);
+  assert.equal(view.getInt16(2, true), 32767);
+  assert.equal(view.getInt16(4, true), -32768);
+});
+
+test("StreamingResampler passes through when the rate already matches", () => {
+  const r = new StreamingResampler(16000, 16000);
+  const frame = new Float32Array([0.1, 0.2, 0.3]);
+  assert.equal(r.push(frame), frame);
+  assert.equal(r.flush().length, 0);
+});
+
+test("StreamingResampler carries the remainder between frames", () => {
+  // 128-sample frames at 48 kHz do not divide evenly by 3. Without a carry,
+  // two samples would be dropped per frame — a steady, audible drift.
+  const r = new StreamingResampler(48000, 16000);
+  let produced = 0;
+  const frames = 30;
+  for (let i = 0; i < frames; i++) produced += r.push(new Float32Array(128).fill(0.5)).length;
+  produced += r.flush().length;
+
+  const expected = (frames * 128) / 3;
+  assert.ok(
+    Math.abs(produced - expected) <= 1,
+    `expected about ${expected} samples, produced ${produced}`,
+  );
+});
+
+test("StreamingResampler matches the one-shot resampler over the same audio", () => {
+  const total = new Float32Array(4800);
+  for (let i = 0; i < total.length; i++) total[i] = Math.sin(i / 9);
+
+  const oneShot = resample(total, 48000, 16000);
+
+  const streamer = new StreamingResampler(48000, 16000);
+  const parts = [];
+  for (let i = 0; i < total.length; i += 128) parts.push(streamer.push(total.slice(i, i + 128)));
+  parts.push(streamer.flush());
+  const streamed = concatFrames(parts);
+
+  assert.ok(Math.abs(streamed.length - oneShot.length) <= 1);
+  for (let i = 0; i < Math.min(streamed.length, oneShot.length); i++) {
+    assert.ok(
+      Math.abs(streamed[i] - oneShot[i]) < 1e-6,
+      `sample ${i}: ${streamed[i]} vs ${oneShot[i]}`,
+    );
+  }
 });
 
 test("rms is zero for silence and positive for signal", () => {
