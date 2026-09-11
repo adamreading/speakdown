@@ -1,0 +1,21 @@
+# Secrets — never commit your API key
+.env
+.env.local
+*.key
+
+# Node
+node_modules/
+npm-debug.log*
+.npm
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Local recordings / scratch
+recordings/
+*.wav
+!test/fixtures/*.wav
+tmp/

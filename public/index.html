@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Speakdown — dictate prose, speak the formatting</title>
+    <meta
+      name="description"
+      content="A voice-native markdown editor built on the AssemblyAI Sync (Dictation) API. Dictate the prose, speak the formatting."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230a0b0e'/%3E%3Cpath d='M16 6a3.2 3.2 0 0 1 3.2 3.2v6a3.2 3.2 0 0 1-6.4 0v-6A3.2 3.2 0 0 1 16 6z' fill='%23ff5d5d'/%3E%3Cpath d='M10 15.2a6 6 0 0 0 12 0M16 21.2V26M12.4 26h7.2' stroke='%235eead4' stroke-width='1.8' fill='none' stroke-linecap='round'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="/css/app.css" />
+  </head>
+  <body>
+    <div class="app" id="app">
+      <!-- ─── Header ─────────────────────────────────────────────── -->
+      <header class="topbar">
+        <div class="brand">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+            <path
+              d="M16 5a3.4 3.4 0 0 1 3.4 3.4v6.2a3.4 3.4 0 0 1-6.8 0V8.4A3.4 3.4 0 0 1 16 5z"
+              fill="currentColor"
+            />
+            <path
+              d="M9.6 14.6a6.4 6.4 0 0 0 12.8 0M16 21v4.4M12.2 25.4h7.6"
+              stroke="currentColor"
+              stroke-width="1.9"
+              fill="none"
+              stroke-linecap="round"
+            />
+          </svg>
+          <div class="brand-text">
+            <h1>Speakdown</h1>
+            <p>Dictate the prose. Speak the formatting.</p>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <span class="pill" id="modePill" title="Loading…">
+            <span class="pill-dot"></span><span id="modeLabel">…</span>
+          </span>
+
+          <label class="field" title="Transcription language">
+            <span class="field-label">Lang</span>
+            <select id="language" aria-label="Transcription language"></select>
+          </label>
+
+          <button class="btn" id="btnCopy" title="Copy markdown (⌘/Ctrl+Shift+C)">Copy</button>
+          <button class="btn" id="btnDownload" title="Download .md (⌘/Ctrl+S)">Export</button>
+          <button class="btn btn-quiet" id="btnClear" title="Clear the document">Clear</button>
+          <button class="btn btn-quiet btn-icon" id="btnRail" title="Toggle side panel" aria-expanded="true">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 3h12M2 8h12M2 13h8" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+      </header>
+
+      <!-- ─── Banner (demo / errors) ─────────────────────────────── -->
+      <div class="banner" id="banner" hidden>
+        <span id="bannerText"></span>
+        <button class="banner-close" id="bannerClose" aria-label="Dismiss">×</button>
+      </div>
+
+      <!-- ─── Main ───────────────────────────────────────────────── -->
+      <main class="workspace" id="workspace">
+        <section class="pane pane-source" aria-label="Markdown source">
+          <div class="pane-head">
+            <h2>Markdown</h2>
+            <div class="pane-head-actions">
+              <label class="toggle" title="Underline words the model was unsure about">
+                <input type="checkbox" id="toggleHeatmap" checked />
+                <span>Confidence</span>
+              </label>
+              <button class="btn btn-tiny" id="btnEditSource" title="Edit the markdown by hand">Edit</button>
+            </div>
+          </div>
+          <div class="pane-body">
+            <pre class="source" id="source" aria-live="polite"></pre>
+            <textarea
+              class="source-edit"
+              id="sourceEdit"
+              spellcheck="false"
+              hidden
+              aria-label="Editable markdown source"
+            ></textarea>
+            <div class="empty-state" id="emptyState">
+              <p class="empty-title">Nothing dictated yet</p>
+              <p class="empty-body">
+                Press the mic and start talking. Say <em>“heading two”</em>, <em>“bullet list”</em> or
+                <em>“scratch that”</em> and the document reshapes itself.
+              </p>
+            </div>
+          </div>
+        </section>
+
+        <section class="pane pane-preview" aria-label="Rendered preview">
+          <div class="pane-head">
+            <h2>Preview</h2>
+            <div class="pane-head-actions">
+              <span class="muted-mono" id="docStats">0 words</span>
+            </div>
+          </div>
+          <div class="pane-body">
+            <article class="preview" id="preview"></article>
+          </div>
+        </section>
+
+        <aside class="rail" id="rail" aria-label="Commands and activity">
+          <div class="rail-tabs" role="tablist">
+            <button class="rail-tab is-active" data-tab="commands" role="tab" aria-selected="true">Commands</button>
+            <button class="rail-tab" data-tab="activity" role="tab" aria-selected="false">Activity</button>
+            <button class="rail-tab" data-tab="settings" role="tab" aria-selected="false">Settings</button>
+          </div>
+
+          <div class="rail-panel is-active" id="tab-commands" role="tabpanel">
+            <div id="commandList"></div>
+          </div>
+
+          <div class="rail-panel" id="tab-activity" role="tabpanel">
+            <div class="activity-empty" id="activityEmpty">
+              Every request shows up here with its round trip, so you can see what the
+              API actually cost.
+            </div>
+            <ol class="activity" id="activity"></ol>
+          </div>
+
+          <div class="rail-panel" id="tab-settings" role="tabpanel">
+            <div class="setting">
+              <label class="setting-label" for="fillerLevel">Filler removal</label>
+              <select id="fillerLevel">
+                <option value="off">Off — keep every word</option>
+                <option value="standard" selected>Standard — um, uh, you know</option>
+                <option value="aggressive">Aggressive — also basically, actually, like</option>
+              </select>
+              <p class="setting-hint">
+                Done client-side. The Sync API reference documents no filler-removal
+                option, so Speakdown strips them here and counts what it dropped.
+              </p>
+            </div>
+
+            <div class="setting">
+              <label class="setting-label" for="captureMode">Capture</label>
+              <select id="captureMode">
+                <option value="vad" selected>Continuous — segment on pauses</option>
+                <option value="ptt">Push to talk — hold Space</option>
+              </select>
+              <p class="setting-hint">
+                Continuous mode closes an utterance after ~700 ms of silence and keeps
+                300 ms of pre-roll so the first sound is not clipped.
+              </p>
+            </div>
+
+            <div class="setting">
+              <label class="toggle">
+                <input type="checkbox" id="togglePunctuation" />
+                <span>Spoken punctuation</span>
+              </label>
+              <p class="setting-hint">
+                Off by default — the model already punctuates prose. Turn on to say
+                “comma”, “full stop”, “open quote” literally.
+              </p>
+            </div>
+
+            <div class="setting">
+              <label class="toggle">
+                <input type="checkbox" id="toggleAutoscroll" checked />
+                <span>Follow the cursor</span>
+              </label>
+            </div>
+
+            <div class="setting setting-meta">
+              <h3>Request shape</h3>
+              <dl class="meta-list">
+                <dt>Endpoint</dt><dd id="metaEndpoint">—</dd>
+                <dt>Model</dt><dd id="metaModel">—</dd>
+                <dt>Audio</dt><dd>16 kHz mono, 16-bit WAV</dd>
+                <dt>keyterms_prompt</dt><dd id="metaKeyterms">—</dd>
+                <dt>conversation_context</dt><dd id="metaContext">rolling, 8 turns</dd>
+              </dl>
+            </div>
+          </div>
+        </aside>
+      </main>
+
+      <!-- ─── Dock ───────────────────────────────────────────────── -->
+      <footer class="dock">
+        <div class="dock-mic">
+          <button class="mic" id="btnMic" aria-label="Start dictation">
+            <span class="mic-ring"></span>
+            <svg class="mic-glyph" viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3a3 3 0 0 1 3 3v5a3 3 0 0 1-6 0V6a3 3 0 0 1 3-3z" fill="currentColor" />
+              <path
+                d="M7 11a5 5 0 0 0 10 0M12 16v4M9 20h6"
+                stroke="currentColor"
+                stroke-width="1.8"
+                fill="none"
+                stroke-linecap="round"
+              />
+            </svg>
+          </button>
+          <button class="btn btn-demo" id="btnDemo" hidden>Play demo</button>
+        </div>
+
+        <div class="dock-meter">
+          <canvas id="meter" width="640" height="44" aria-hidden="true"></canvas>
+          <div class="dock-status">
+            <span class="status" id="status">Idle</span>
+            <span class="status-hint" id="statusHint">Press the mic, or hit ⌘/Ctrl + Enter</span>
+          </div>
+        </div>
+
+        <div class="dock-stats">
+          <div class="stat stat-latency">
+            <span class="stat-value" id="statLatency">—</span>
+            <span class="stat-label">last round trip</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value" id="statMedian">—</span>
+            <span class="stat-label">median</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value" id="statWords">0</span>
+            <span class="stat-label">words</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value" id="statFillers">0</span>
+            <span class="stat-label">fillers cut</span>
+          </div>
+          <div class="stat">
+            <span class="stat-value" id="statCommands">0</span>
+            <span class="stat-label">commands</span>
+          </div>
+        </div>
+      </footer>
+    </div>
+
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+
+    <script type="module" src="/js/app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "name": "speakdown",
+  "version": "1.0.0",
+  "description": "A voice-native markdown editor. Dictate prose, speak the formatting. Built on the AssemblyAI Sync (Dictation) API.",
+  "type": "module",
+  "main": "server/index.js",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "keywords": [
+    "dictation",
+    "speech-to-text",
+    "markdown",
+    "assemblyai",
+    "voice",
+    "editor"
+  ],
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {}
+}
