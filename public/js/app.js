@@ -98,7 +98,7 @@ async function init() {
   restoreSettings();
 
   try {
-    state.config = await (await fetch("/api/config")).json();
+    state.config = await (await fetch("api/config")).json();
   } catch {
     state.config = { mode: "demo", languages: [{ code: "en", label: "English" }] };
   }

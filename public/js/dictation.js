@@ -48,7 +48,7 @@ export class LiveDictation {
    * utterance clobber the finishing one's session id and byte counters.
    */
   async startUtterance(options = {}) {
-    const response = await fetch("/api/dictate/start", {
+    const response = await fetch("api/dictate/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(this.buildConfig(options)),
@@ -64,7 +64,7 @@ export class LiveDictation {
     const config = encodeURIComponent(JSON.stringify(this.buildConfig(options)));
     const waitFrom = performance.now();
 
-    const response = await fetch(`/api/transcribe?config=${config}`, {
+    const response = await fetch(`api/transcribe?config=${config}`, {
       method: "POST",
       headers: { "Content-Type": "audio/wav" },
       body: wavBlob,
@@ -106,7 +106,7 @@ class Utterance {
     this.sendChain = this.sendChain
       .then(() => {
         if (this.closed) return null;
-        return fetch(`/api/dictate/chunk?session=${encodeURIComponent(this.sessionId)}`, {
+        return fetch(`api/dictate/chunk?session=${encodeURIComponent(this.sessionId)}`, {
           method: "POST",
           headers: { "Content-Type": "application/octet-stream" },
           body: pcmBytes,
@@ -129,7 +129,7 @@ class Utterance {
     const waitFrom = performance.now();
 
     const response = await fetch(
-      `/api/dictate/end?session=${encodeURIComponent(this.sessionId)}`,
+      `api/dictate/end?session=${encodeURIComponent(this.sessionId)}`,
       { method: "POST" },
     );
     const payload = await response.json().catch(() => ({}));
@@ -150,7 +150,7 @@ class Utterance {
     if (this.closed) return;
     this.closed = true;
     try {
-      await fetch(`/api/dictate/abort?session=${encodeURIComponent(this.sessionId)}`, {
+      await fetch(`api/dictate/abort?session=${encodeURIComponent(this.sessionId)}`, {
         method: "POST",
       });
     } catch {

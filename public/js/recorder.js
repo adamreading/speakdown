@@ -42,6 +42,15 @@ const DEFAULTS = {
   thresholdFactor: 3.5,
   /** Offset threshold as a fraction of onset threshold (hysteresis). */
   releaseRatio: 0.6,
+  // --- dBFS envelope noise gate (ported from Lunk Room) ---------------------
+  /** Open the gate at/above this level, in dBFS. Speech ~ -40..-25; noise < -55. */
+  thresholdDb: -50,
+  /** Close the gate this far BELOW the open threshold (hysteresis, dB). */
+  hystDb: 3,
+  /** Envelope follower: fast rise, slow fall — holds through syllable gaps so an
+   *  utterance is not chopped into fragments. */
+  envAttack: 0.5,
+  envRelease: 0.06,
 };
 
 export const RecorderState = {
@@ -187,7 +196,7 @@ export class Recorder {
 
     if (this.ctx.audioWorklet) {
       try {
-        await this.ctx.audioWorklet.addModule("/js/capture-worklet.js");
+        await this.ctx.audioWorklet.addModule("js/capture-worklet.js");
         const node = new AudioWorkletNode(this.ctx, "speakdown-capture", {
           numberOfInputs: 1,
           numberOfOutputs: 0,
@@ -220,11 +229,16 @@ export class Recorder {
     const frameMs = (frame.length / this.sampleRate) * 1000;
     const level = rms(frame);
 
-    const onsetThreshold = Math.max(
-      this.noiseFloor * this.opts.thresholdFactor,
-      this.opts.minThreshold,
-    );
-    const releaseThreshold = onsetThreshold * this.opts.releaseRatio;
+    // dBFS envelope gate (Lunk Room port): smooth the level with a fast-attack /
+    // slow-release follower, then gate in dB with hysteresis. Raw per-frame RMS
+    // has sub-threshold gaps between syllables that fragment an utterance; the
+    // envelope + hysteresis hold through them.
+    const db = level > 1e-7 ? 20 * Math.log10(level) : -100;
+    this.envDb += (db > this.envDb ? this.opts.envAttack : this.opts.envRelease) * (db - this.envDb);
+    const openDb = this.opts.thresholdDb;
+    const closeDb = this.opts.thresholdDb - this.opts.hystDb;
+    // Linear equivalent so the existing level meter keeps rendering.
+    const onsetThreshold = Math.pow(10, openDb / 20);
     this.onLevel(level, onsetThreshold);
 
     if (!this.speaking) {
@@ -233,7 +247,7 @@ export class Recorder {
 
       if (this.mode === "ptt") return; // opening is driven by the key, not energy
 
-      if (level > onsetThreshold) {
+      if (this.envDb >= openDb) {
         this.voicedMs += frameMs;
         if (this.voicedMs >= this.opts.onsetMs) this.#open();
       } else {
@@ -247,7 +261,7 @@ export class Recorder {
     this.utteranceMs += frameMs;
 
     if (this.mode === "vad") {
-      if (level > releaseThreshold) {
+      if (this.envDb >= closeDb) {
         this.silentMs = 0;
       } else {
         this.silentMs += frameMs;
@@ -373,6 +387,7 @@ export class Recorder {
     this.silentMs = 0;
     this.utteranceMs = 0;
     this.noiseFloor = 0.01;
+    this.envDb = -100;
     this.resampler = null;
     this.openedAt = 0;
   }

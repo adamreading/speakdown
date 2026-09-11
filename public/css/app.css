@@ -1290,3 +1290,27 @@ textarea {
 .stat-muted .stat-value {
   color: var(--text-faint);
 }
+
+/* AssemblyAI attribution — Dictation by AssemblyAI (header credit) */
+.aai-credit {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  text-decoration: none;
+  padding: 5px 11px;
+  border-radius: 9px;
+  border: 1px solid var(--border-soft);
+  background: var(--panel);
+  transition: border-color 0.15s ease, opacity 0.15s ease;
+}
+.aai-credit:hover { border-color: var(--border); opacity: 0.9; }
+.aai-by {
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-weight: 600;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.aai-logo { height: 18px; width: auto; display: block; }
+@media (max-width: 760px) { .aai-by { display: none; } }
