@@ -19,3 +19,6 @@ recordings/
 *.wav
 !test/fixtures/*.wav
 tmp/
+
+# local backup archive
+speakdown_*.tar.gz
