@@ -11,6 +11,7 @@ said disappears. No keyboard, no toolbar, no mouse.
 
 Built for AssemblyAI's Voice Hackathon Week, September 2026.
 **Demo video:** <https://www.loom.com/share/fbd68c400d7c44d5bddbf64c3387c301>
+**The voiced demo, recorded:** <https://www.loom.com/share/af9a5d7fbd77441190c862009f1a4126>
 
 ---
 
