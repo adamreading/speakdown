@@ -100,6 +100,16 @@ export class InviteStore {
     this.save(invites);
   }
 
+  /** Push an invite's expiry to `hours` from now, keeping the same link. */
+  extend(token, hours, now = Date.now()) {
+    if (!(hours > 0)) throw new Error("hours must be a positive number");
+    const invites = this.load(now);
+    if (!invites[token]) return null;
+    invites[token].expiresAt = now + Math.round(hours * 3_600_000);
+    this.save(invites);
+    return { token, ...invites[token] };
+  }
+
   revoke(token) {
     const invites = this.load();
     if (!invites[token]) return false;
@@ -212,6 +222,15 @@ function cli(argv) {
       }
       return;
     }
+    case "extend": {
+      const token = rest.find((arg) => !arg.startsWith("--"));
+      if (!token || !flags.hours) return usage(1);
+      const invite = store.extend(token, Number(flags.hours));
+      if (!invite) return console.log("  No such invite.");
+      console.log(`  ${base}?invite=${invite.token}`);
+      console.log(`  expires:  ${new Date(invite.expiresAt).toISOString()} (${formatRemaining(invite.expiresAt - Date.now())})`);
+      return;
+    }
     case "revoke": {
       const token = rest.find((arg) => !arg.startsWith("--"));
       if (!token) return usage(1);
@@ -237,6 +256,7 @@ function usage(code) {
 
     create [--hours N] [--label TEXT]   Mint an invite link (default ${DEFAULT_HOURS} h)
     list                                Show active invites
+    extend <token> --hours N            Move an invite's expiry to N hours from now
     revoke <token>                      Remove one invite now
     clear                               Remove every invite
     prune                               Drop expired invites (also happens automatically)

@@ -78,6 +78,7 @@ const MIME = {
   ".ico": "image/x-icon",
   ".md": "text/markdown; charset=utf-8",
   ".wav": "audio/wav",
+  ".mp3": "audio/mpeg",
 };
 
 // ---------------------------------------------------------------------------
@@ -408,7 +409,9 @@ function applyInviteCookie(req, res, url) {
   if (!token) return;
   const invite = CONFIG.inviteStore.lookup(token);
   if (invite) {
-    if (source === "query") res.setHeader("Set-Cookie", inviteCookie(invite, req));
+    // Re-issued on every page load, not just the first: if the invite has since
+    // been extended, the browser's cookie picks up the new lifetime.
+    res.setHeader("Set-Cookie", inviteCookie(invite, req));
   } else if (source === "query") {
     // A dead link should not leave a stale cookie behind either.
     res.setHeader("Set-Cookie", clearInviteCookie());

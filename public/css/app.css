@@ -1029,6 +1029,22 @@ textarea {
   border-color: rgba(245, 181, 68, 0.5);
 }
 
+.btn-demo-sound {
+  color: var(--text-dim);
+}
+.btn-demo-sound .snd-slash {
+  display: none;
+}
+.btn-demo-sound.is-muted .snd-wave {
+  display: none;
+}
+.btn-demo-sound.is-muted .snd-slash {
+  display: block;
+}
+.btn-demo-sound.is-muted {
+  color: var(--text-faint);
+}
+
 .dock-meter {
   min-width: 0;
 }

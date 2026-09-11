@@ -1,0 +1,191 @@
+[
+  {
+    "index": 0,
+    "file": "00.mp3",
+    "text": "Title, Speakdown field notes",
+    "durationMs": 2232,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 1,
+    "file": "01.mp3",
+    "text": "Heading two, what this is",
+    "durationMs": 2064,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 2,
+    "file": "02.mp3",
+    "text": "Speakdown is a um voice native markdown editor. You dictate the prose and you know you speak the formatting out loud.",
+    "durationMs": 6552,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 3,
+    "file": "03.mp3",
+    "text": "New paragraph",
+    "durationMs": 960,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 4,
+    "file": "04.mp3",
+    "text": "It runs on the AssemblyAI dictation endpoint, which, uh, returns a finished transcript in a single HTTP call.",
+    "durationMs": 6600,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 5,
+    "file": "05.mp3",
+    "text": "Heading two, uploading while you speak",
+    "durationMs": 2112,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 6,
+    "file": "06.mp3",
+    "text": "The endpoint transcribes the audio it already has while the rest is still arriving.",
+    "durationMs": 4152,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 7,
+    "file": "07.mp3",
+    "text": "So Speakdown opens the request the moment it hears you start, and pushes PCM up as it is captured.",
+    "durationMs": 5904,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 8,
+    "file": "08.mp3",
+    "text": "When you stop talking, the only thing left to process is the tail.",
+    "durationMs": 3312,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 9,
+    "file": "09.mp3",
+    "text": "Bold that",
+    "durationMs": 720,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 10,
+    "file": "10.mp3",
+    "text": "Heading two, why the spoken commands land",
+    "durationMs": 2760,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 11,
+    "file": "11.mp3",
+    "text": "Bullet list, every command phrase goes into keyterms prompt on every request",
+    "durationMs": 4512,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 12,
+    "file": "12.mp3",
+    "text": "Next bullet, so heading two comes back as those two words, not heading too",
+    "durationMs": 4272,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 13,
+    "file": "13.mp3",
+    "text": "Next bullet, the parser is deterministic, there is, um, no language model in the command loop",
+    "durationMs": 5232,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 14,
+    "file": "14.mp3",
+    "text": "Next bullet, three hundred milliseconds of pre roll audio is kept before speech onset so the first phoneme survives",
+    "durationMs": 6480,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 15,
+    "file": "15.mp3",
+    "text": "Heading two, the honest bits",
+    "durationMs": 1944,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 16,
+    "file": "16.mp3",
+    "text": "Block quote, the rewrite is on by default and removes disfluencies only. The verbatim transcript always comes back alongside it, so you can see exactly what changed.",
+    "durationMs": 9720,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 17,
+    "file": "17.mp3",
+    "text": "New paragraph, the browser will not hand you sixteen bit audio. MediaRecorder gives you webm opus, which this endpoint rejects with a four fifteen.",
+    "durationMs": 8592,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 18,
+    "file": "18.mp3",
+    "text": "Heading two, running it",
+    "durationMs": 1512,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 19,
+    "file": "19.mp3",
+    "text": "Code block",
+    "durationMs": 936,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 20,
+    "file": "20.mp3",
+    "text": "node server slash index dot js",
+    "durationMs": 2304,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 21,
+    "file": "21.mp3",
+    "text": "End code block",
+    "durationMs": 1248,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 22,
+    "file": "22.mp3",
+    "text": "Divider",
+    "durationMs": 840,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 23,
+    "file": "23.mp3",
+    "text": "Checklist, record the demo video",
+    "durationMs": 2448,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 24,
+    "file": "24.mp3",
+    "text": "New task, push the repo and submit the form",
+    "durationMs": 2856,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 25,
+    "file": "25.mp3",
+    "text": "This last sentence is a mistake.",
+    "durationMs": 1704,
+    "voice": "en-Finn_man"
+  },
+  {
+    "index": 26,
+    "file": "26.mp3",
+    "text": "Scratch that",
+    "durationMs": 912,
+    "voice": "en-Finn_man"
+  }
+]

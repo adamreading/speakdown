@@ -25,8 +25,13 @@ That is the whole setup. **Zero npm dependencies** — no `npm install`, no
 lockfile, no build step. Node 20 or newer is the only requirement.
 
 Open <http://localhost:3000>. With no API key it starts in **Demo Mode** and
-replays a scripted dictation with realistic timings, so you can see the entire
-editor work without a key or a microphone. Press *Play demo*.
+replays a scripted dictation, so you can see the entire editor work without a
+key or a microphone. Press *Play demo*. The demo is **voiced**: each line is
+spoken aloud by a cloned voice (Chatterbox, rendered offline into
+`public/demo/`), the level meter follows the audio, and the clip's own end is
+the moment the transcript timing starts from — so what you watch is what live
+dictation feels like. The speaker button beside *Play demo* mutes it. *Play demo*
+is available in live mode too.
 
 For real dictation:
 
@@ -39,7 +44,7 @@ node server/index.js
 normally — no HTTPS or tunnel needed.
 
 ```bash
-npm test                 # 156 tests, no dependencies, ~1s
+npm test                 # 165 tests, no dependencies, ~1s
 ```
 
 ### Hosting it for other people
@@ -336,7 +341,10 @@ server/
   index.js              HTTP server, static files, streaming session bridge
   dictation-api.js      The Dictation API client — multipart assembly, errors
   invite.js             Expiring invite links for a hosted instance (+ CLI)
+scripts/
+  make-demo-audio.mjs   Renders the demo script to public/demo/*.mp3 via TTS
 public/
+  demo/                 Voiced demo clips + manifest.json (durations)
   index.html            The editor shell
   css/app.css           All styling
   js/
@@ -350,7 +358,7 @@ public/
     doc.js              Block document model, undo, markdown serialisation
     text.js             Filler removal, fragment joining, emphasis wrapping
     markdown.js         Markdown renderer and source highlighter
-test/                   156 tests across all of the above
+test/                   165 tests across all of the above
 ```
 
 The pipeline lives apart from `app.js` deliberately: it holds all the interesting

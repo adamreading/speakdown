@@ -173,6 +173,11 @@ test("invite-only gating on the live server", async (t) => {
     assert.equal(config.mode, "live");
     assert.equal(config.access, "invited");
     assert.equal(config.inviteExpiresAt, invite.expiresAt);
+
+    // Extending the invite must reach browsers that already hold the cookie.
+    store.extend(invite.token, 200);
+    const again = await fetch(`${base}/`, { headers: { cookie: `${COOKIE_NAME}=${invite.token}` } });
+    assert.match(again.headers.get("set-cookie"), /Max-Age=7199\d\d;/, "cookie re-issued with ~200 h left");
   });
 
   await t.test("a revoked or unknown token reports expired and clears the cookie", async () => {

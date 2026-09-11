@@ -71,7 +71,15 @@ const state = {
     punctuation: false,
     heatmap: true,
     autoscroll: true,
+    demoSound: true,
   },
+
+  /** public/demo/manifest.json — one voiced clip per DEMO_SCRIPT line, or null. */
+  demoClips: null,
+  demoAudio: null,
+  demoAudioCtx: null,
+  demoGain: null,
+  demoAudioWarned: false,
 
   waits: [],
   streamedBytes: 0,
@@ -118,6 +126,21 @@ async function init() {
   populateLanguages();
   applyModeChrome();
   render();
+  loadDemoClips();
+}
+
+/** The voiced demo is optional: without the manifest the demo runs on timed silence. */
+async function loadDemoClips() {
+  try {
+    const list = await (await fetch("demo/manifest.json")).json();
+    if (!Array.isArray(list) || !list.length) return;
+    state.demoClips = [];
+    for (const clip of list) state.demoClips[clip.index] = clip;
+    el.btnDemoSound.hidden = false;
+    updateDemoSoundButton();
+  } catch {
+    /* no clips shipped — silent demo */
+  }
 }
 
 function cacheElements() {
@@ -129,7 +152,7 @@ function cacheElements() {
     "uploadMode", "captureMode", "fillerLevel", "llmInstruction",
     "togglePunctuation", "toggleHeatmap", "toggleAutoscroll", "btnEditSource",
     "metaEndpoint", "metaAudio", "metaKeyterms", "metaLlm",
-    "btnMic", "btnDemo", "meter", "status", "statusHint", "btnLlmHelp", "llmHelp", "llmHelpClose", "llmHelpLimit",
+    "btnMic", "btnDemo", "btnDemoSound", "meter", "status", "statusHint", "btnLlmHelp", "llmHelp", "llmHelpClose", "llmHelpLimit",
     "statWait", "statMedian", "statStreamed", "statWords", "statCommands",
     "toasts",
   ];
@@ -252,6 +275,12 @@ function flashCommand(cmd) {
 function bindEvents() {
   el.btnMic.addEventListener("click", toggleDictation);
   el.btnDemo.addEventListener("click", toggleDemo);
+  el.btnDemoSound.addEventListener("click", () => {
+    state.settings.demoSound = !state.settings.demoSound;
+    applyDemoVolume();
+    updateDemoSoundButton();
+    persistSettings();
+  });
   el.btnCopy.addEventListener("click", copyMarkdown);
   el.btnDownload.addEventListener("click", downloadMarkdown);
   el.btnClear.addEventListener("click", clearDocument);
@@ -943,8 +972,9 @@ async function runDemo() {
   if (state.demo.remaining === 0) resetSession();
 
   while (state.demoRunning && !state.demoAbort && state.demo.remaining > 0) {
-    const entry = DEMO_SCRIPT[DEMO_SCRIPT.length - state.demo.remaining];
-    const speakMs = 700 + Math.min(1600, (entry?.text || "").length * 16);
+    const index = DEMO_SCRIPT.length - state.demo.remaining;
+    const entry = DEMO_SCRIPT[index];
+    const clip = state.demoClips?.[index] || null;
 
     const utterance = await state.demo.startUtterance();
 
@@ -953,7 +983,7 @@ async function runDemo() {
     state.meterMood = "speaking";
     setStatus("Speaking", "is-speaking");
     el.statusHint.textContent = "Uploading as you speak";
-    await animateFakeLevels(speakMs);
+    await speakDemoLine(clip, entry);
     if (state.demoAbort) break;
 
     el.btnMic.classList.remove("is-speaking");
@@ -979,11 +1009,106 @@ async function runDemo() {
 function stopDemo() {
   state.demoRunning = false;
   state.demoAbort = true;
+  state.demoAudio?.pause();
+  state.demoAudio = null;
   state.currentLevel = 0;
   state.meterMood = "idle";
   el.btnDemo.textContent = state.demo?.remaining === 0 ? "Replay demo" : "Play demo";
   el.btnMic.classList.remove("is-listening", "is-speaking");
   setStatus("Idle");
+}
+
+/**
+ * One line of the demo, spoken aloud. The clip's own `ended` event is the
+ * moment the speaker stopped, so the transcript timing follows the audio
+ * exactly rather than a guess from text length. The level meter reads the
+ * clip through an AnalyserNode so the bars move with the voice. With no clip,
+ * or if the browser refuses to play, it falls back to the timed envelope.
+ */
+async function speakDemoLine(clip, entry) {
+  const fallbackMs = 700 + Math.min(1600, (entry?.text || "").length * 16);
+  if (!clip) return animateFakeLevels(fallbackMs);
+
+  const audio = new Audio(`demo/${clip.file}`);
+  audio.preload = "auto";
+  state.demoAudio = audio;
+
+  let ended = false;
+  audio.addEventListener("ended", () => (ended = true), { once: true });
+  audio.addEventListener("error", () => (ended = true), { once: true });
+
+  const level = attachDemoAnalyser(audio);
+  if (!level) audio.muted = !state.settings.demoSound;
+
+  try {
+    await audio.play();
+  } catch {
+    state.demoAudio = null;
+    if (!state.demoAudioWarned) {
+      state.demoAudioWarned = true;
+      toast("Browser blocked the demo voice — running silently", "!");
+    }
+    return animateFakeLevels(clip.durationMs || fallbackMs);
+  }
+
+  const started = performance.now();
+  const limit = (clip.durationMs || fallbackMs) + 2500;
+  while (!ended && !state.demoAbort && performance.now() - started < limit) {
+    if (level) {
+      state.currentLevel = Math.min(0.14, level() * 0.7);
+    } else {
+      const t = (performance.now() - started) / 1000;
+      const envelope = 0.5 + 0.5 * Math.sin(t * 2 * Math.PI * 4.2);
+      state.currentLevel = 0.02 + envelope * 0.07 + Math.random() * 0.025;
+    }
+    state.threshold = 0.022;
+    await sleep(28);
+  }
+  audio.pause();
+  if (state.demoAudio === audio) state.demoAudio = null;
+  state.currentLevel = 0;
+}
+
+/** Route the clip through an analyser + gain so the meter follows the voice and mute is instant. */
+function attachDemoAnalyser(audio) {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return null;
+    state.demoAudioCtx ??= new Ctx();
+    const ctx = state.demoAudioCtx;
+    if (ctx.state === "suspended") ctx.resume();
+    if (!state.demoGain) {
+      state.demoGain = ctx.createGain();
+      state.demoGain.connect(ctx.destination);
+    }
+    applyDemoVolume();
+    const source = ctx.createMediaElementSource(audio);
+    const analyser = ctx.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
+    analyser.connect(state.demoGain);
+    const buffer = new Float32Array(analyser.fftSize);
+    return () => {
+      analyser.getFloatTimeDomainData(buffer);
+      let sum = 0;
+      for (const v of buffer) sum += v * v;
+      return Math.sqrt(sum / buffer.length);
+    };
+  } catch {
+    return null;
+  }
+}
+
+function applyDemoVolume() {
+  if (state.demoGain) state.demoGain.gain.value = state.settings.demoSound ? 1 : 0;
+  if (state.demoAudio && !state.demoGain) state.demoAudio.muted = !state.settings.demoSound;
+}
+
+function updateDemoSoundButton() {
+  const on = !!state.settings.demoSound;
+  el.btnDemoSound.classList.toggle("is-muted", !on);
+  el.btnDemoSound.setAttribute("aria-pressed", String(on));
+  el.btnDemoSound.title = on ? "Demo voice on — click to mute" : "Demo voice muted — click to unmute";
 }
 
 async function animateFakeLevels(durationMs) {
@@ -1162,6 +1287,7 @@ function restoreSettings() {
   el.toggleHeatmap.checked = !!state.settings.heatmap;
   el.toggleAutoscroll.checked = !!state.settings.autoscroll;
   el.app.classList.toggle("no-heatmap", !state.settings.heatmap);
+  updateDemoSoundButton();
 }
 
 function sleep(ms) {
