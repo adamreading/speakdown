@@ -7,11 +7,15 @@ You talk; structured markdown appears. Say "heading two" and you get a heading.
 Say "bullet list" and you get a list. Say "scratch that" and the last thing you
 said disappears. No keyboard, no toolbar, no mouse.
 
-![Speakdown](docs/screenshot.png)
+<a href="https://www.loom.com/share/af9a5d7fbd77441190c862009f1a4126">
+  <img src="docs/loom-voiced.jpg" alt="Watch the 2-minute demo" width="100%">
+</a>
+
+**▶ [Watch the 2-minute demo](https://www.loom.com/share/af9a5d7fbd77441190c862009f1a4126)**
 
 Built for AssemblyAI's Voice Hackathon Week, September 2026.
-**Demo video:** <https://www.loom.com/share/fbd68c400d7c44d5bddbf64c3387c301>
-**The voiced demo, recorded:** <https://www.loom.com/share/af9a5d7fbd77441190c862009f1a4126>
+
+![Speakdown](docs/screenshot.png)
 
 ---
 
@@ -202,6 +206,13 @@ Separately, short phrases that occur in ordinary prose — "heading", "quote",
 "bold", "comma" — are marked strict, forcing at least boundary anchoring.
 Without it, "the quote was misattributed to him" silently becomes a blockquote.
 
+**You can see where the next words will land.** A caret sits in the source pane
+at the insertion point and blinks while you dictate. After a block command it
+moves to a line of its own carrying the markdown the next words will get —
+`- ` after "bullet list", `3. ` after the third "next number", `## ` after
+"heading two", a continuation indent after "new line" — so an empty block is
+visible before you have said anything into it.
+
 **"Strike that" means delete, not strikethrough.** That has been the dictation
 convention for fifty years and getting it backwards would be destructive. Say
 "strikethrough that" for `~~text~~`.
@@ -325,9 +336,10 @@ Streaming saves less on very short utterances than on long ones — there is
 simply less uploaded-but-unprocessed audio to overlap with. The docs say this
 too. On two-second clips the win is small; on fifteen-second ones it is obvious.
 
-Hand-editing the source pane discards the transcript log, so the Cleaned/Verbatim
-toggle stops working for that document. The alternative was letting a later
-toggle silently revert your edit, which is worse.
+Hand-editing the source pane turns the edited markdown into the floor the
+document is rebuilt from: the Cleaned/Verbatim toggle keeps working for
+everything dictated afterwards, but the text you typed no longer has a verbatim
+counterpart, so it reads the same in both views.
 
 Utterance segmentation is tuned for a reasonably quiet room with a close
 microphone. It degrades in a noisy open-plan office — a limitation of
