@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
 
-import { server, LANGUAGES, LIMITS } from "../server/index.js";
+import { server, CONFIG, LANGUAGES, LIMITS } from "../server/index.js";
 import { sanitiseConfig, describeError } from "../server/dictation-api.js";
 
 const base = await new Promise((resolve) => {
@@ -20,6 +20,9 @@ test.after(() => server.close());
  * asserting "demo" outright made it fail the moment a .env existed, which is
  * exactly the state a developer runs it in.
  */
+// Invite gating has its own suite (invite.test.js); here the server is tested as
+// a plain local instance regardless of what the developer's .env says.
+CONFIG.inviteOnly = false;
 const configured = (await (await fetch(`${base}/api/config`)).json()).mode === "live";
 
 test("GET /api/config reports a valid mode and the 19 supported languages", async () => {

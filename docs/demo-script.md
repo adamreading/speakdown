@@ -136,4 +136,8 @@ pressure. The only reason to restart is if the mic drops entirely.
 - [ ] Form: also submit the API feedback (discoverability vs the Sync product,
       the buried "uploading while recording" section, the missing browser
       HTTP/2 caveat, and the 18-vs-19 language count) — there is a $50 bounty
-      for feedback and these are real findings, in `docs/submission.md`
+      for feedback and these are real findings; the write-up is in the README
+      under "Notes on the Dictation API"
+- [ ] Hosted link: `node server/invite.js create --hours 72 --label judges`
+      on the host, paste the printed URL into the form, and check it in a
+      private window shows the **LIVE** pill

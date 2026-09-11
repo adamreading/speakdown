@@ -135,20 +135,42 @@ function applyModeChrome() {
   el.modePill.classList.toggle("is-live", live);
   el.modePill.classList.toggle("is-demo", !live);
   el.modeLabel.textContent = live ? "Live" : "Demo";
+  const access = state.config?.access || (live ? "open" : "no_key");
+  const expiresAt = state.config?.inviteExpiresAt;
   el.modePill.title = live
-    ? "Connected to the AssemblyAI Dictation API"
-    : "No API key configured — replaying a scripted document";
+    ? access === "invited" && expiresAt
+      ? `Connected to the AssemblyAI Dictation API — invite valid until ${new Date(expiresAt).toLocaleString()}`
+      : "Connected to the AssemblyAI Dictation API"
+    : access === "no_key"
+      ? "No API key configured — replaying a scripted document"
+      : "Invite-only instance — replaying a scripted document";
 
   el.btnDemo.hidden = live;
   el.metaEndpoint.textContent = state.config?.endpoint || "dictation.assemblyai.com/v1/transcribe/live";
   el.metaKeyterms.textContent = `${KEYTERMS.length} phrases, every request`;
   updateMetaFromSettings();
 
+  // The invite token has done its job once the cookie is set; keep it out of
+  // the address bar, screenshots and browser history.
+  if (access === "invited" && new URLSearchParams(location.search).has("invite")) {
+    const clean = new URL(location.href);
+    clean.searchParams.delete("invite");
+    history.replaceState(null, "", clean.pathname + (clean.search || "") + clean.hash);
+  }
+
   if (!live) {
-    showBanner(
-      "Demo Mode — no API key set, so this replays a scripted document with simulated " +
+    const why = {
+      no_key:
+        "Demo Mode — no API key set, so this replays a scripted document with simulated " +
         "timings. Add ASSEMBLYAI_API_KEY to .env and restart for real dictation.",
-    );
+      invite_required:
+        "Demo Mode — this hosted copy unlocks live dictation only through an invite link. " +
+        "Everything else works: press Play demo to watch it build a document.",
+      expired:
+        "Demo Mode — your invite link has expired or was revoked, so live dictation is off. " +
+        "Press Play demo to keep exploring the editor.",
+    };
+    showBanner(why[access] || why.no_key);
     el.statusHint.textContent = "Press Play demo to watch it build a document";
   }
 }
@@ -612,6 +634,10 @@ function reportTranscriptionError(err) {
   if (err.fatal || err.code === "invalid_api_key" || err.code === "no_api_key") {
     showBanner(err.message, true);
     stopDictation();
+    return;
+  }
+  if (err.code === "busy") {
+    showBanner(err.message, true);
     return;
   }
   if (err.status === 429) {

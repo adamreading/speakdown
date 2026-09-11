@@ -38,6 +38,7 @@ import {
   transcribeBuffered,
   openStream,
 } from "./dictation-api.js";
+import { InviteStore, tokenFromRequest, inviteCookie, clearInviteCookie } from "./invite.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, "..");
@@ -51,6 +52,16 @@ const CONFIG = {
     process.env.SPEAKDOWN_API_URL || "https://dictation.assemblyai.com/v1/transcribe/live"
   ).trim(),
   port: Number(process.env.PORT || 3000),
+  /**
+   * Hosted-instance protection. When set, live dictation is unlocked only for
+   * browsers that arrived through `node server/invite.js create`; everyone
+   * else gets Demo Mode. Off by default so a local clone behaves as the README
+   * says. See server/invite.js.
+   */
+  inviteOnly: isTruthy(process.env.SPEAKDOWN_INVITE_ONLY),
+  inviteStore: new InviteStore(),
+  /** Upper bound on simultaneous upstream requests — a cap on how fast credit can drain. */
+  maxLiveSessions: Number(process.env.SPEAKDOWN_MAX_LIVE_SESSIONS || 6),
 };
 
 /** Live streaming sessions, keyed by id. Reaped if a client vanishes. */
@@ -76,9 +87,12 @@ const server = http.createServer(async (req, res) => {
 
   try {
     switch (`${req.method} ${url.pathname}`) {
-      case "GET /api/config":
+      case "GET /api/config": {
+        const access = resolveAccess(req, url);
         return sendJson(res, 200, {
-          mode: CONFIG.apiKey ? "live" : "demo",
+          mode: access.live ? "live" : "demo",
+          access: access.reason,
+          inviteExpiresAt: access.invite?.expiresAt ?? null,
           endpoint: CONFIG.apiUrl,
           languages: LANGUAGES,
           limits: {
@@ -87,6 +101,7 @@ const server = http.createServer(async (req, res) => {
             maxLlmInstructionChars: LIMITS.maxLlmInstructionChars,
           },
         });
+      }
 
       case "POST /api/dictate/start":
         return await handleStart(req, res, url);
@@ -124,6 +139,11 @@ function start() {
     console.log(`  http://localhost:${CONFIG.port}`);
     console.log(`  mode:     ${CONFIG.apiKey ? "LIVE" : "DEMO (no ASSEMBLYAI_API_KEY set)"}`);
     console.log(`  endpoint: ${CONFIG.apiUrl}`);
+    if (CONFIG.apiKey && CONFIG.inviteOnly) {
+      const active = CONFIG.inviteStore.list().length;
+      console.log(`  access:   invite-only (${active} active invite${active === 1 ? "" : "s"})`);
+      console.log("            node server/invite.js create --hours 72 --label judges");
+    }
     if (!CONFIG.apiKey) {
       console.log("");
       console.log("  Demo Mode replays a scripted dictation so you can see the whole");
@@ -146,6 +166,9 @@ function start() {
  */
 async function handleStart(req, res, url) {
   if (!CONFIG.apiKey) return noKey(res);
+  const access = resolveAccess(req, url);
+  if (!access.live) return inviteRequired(res, access);
+  if (sessions.size >= CONFIG.maxLiveSessions) return busy(res);
 
   let requested = {};
   try {
@@ -175,6 +198,7 @@ async function handleStart(req, res, url) {
   }
 
   sessions.set(id, { stream, config, openedAt: Date.now(), chunks: 0 });
+  if (access.invite) CONFIG.inviteStore.touch(access.invite.token);
   return sendJson(res, 200, { sessionId: id, config, startedAt: Date.now() });
 }
 
@@ -267,6 +291,10 @@ function reapSessions() {
  */
 async function handleBuffered(req, res, url) {
   if (!CONFIG.apiKey) return noKey(res);
+  const access = resolveAccess(req, url);
+  if (!access.live) return inviteRequired(res, access);
+  if (sessions.size >= CONFIG.maxLiveSessions) return busy(res);
+  if (access.invite) CONFIG.inviteStore.touch(access.invite.token);
 
   let audio;
   try {
@@ -329,6 +357,69 @@ function noKey(res) {
   });
 }
 
+function inviteRequired(res, access) {
+  return sendJson(res, 403, {
+    error: "invite_required",
+    fatal: true,
+    message:
+      access.reason === "expired"
+        ? "Your invite link has expired or was revoked. Live dictation is off; Demo Mode still works."
+        : "This hosted copy of Speakdown unlocks live dictation only through an invite link.",
+  });
+}
+
+function busy(res) {
+  res.setHeader("Retry-After", "5");
+  return sendJson(res, 429, {
+    error: "busy",
+    message: `Speakdown is at its limit of ${CONFIG.maxLiveSessions} simultaneous dictations. Try again in a moment.`,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Access — who gets live dictation
+// ---------------------------------------------------------------------------
+
+/**
+ * Three outcomes: `no_key` (nothing to unlock), `open` (a local instance),
+ * or on an invite-only instance `invited`, `expired` (token presented but not
+ * on file) or `invite_required` (no token at all). Only `open` and `invited`
+ * are live.
+ */
+function resolveAccess(req, url) {
+  if (!CONFIG.apiKey) return { live: false, reason: "no_key", invite: null };
+  if (!CONFIG.inviteOnly) return { live: true, reason: "open", invite: null };
+
+  const { token } = tokenFromRequest(req, url);
+  if (!token) return { live: false, reason: "invite_required", invite: null };
+  const invite = CONFIG.inviteStore.lookup(token);
+  if (!invite) return { live: false, reason: "expired", invite: null };
+  return { live: true, reason: "invited", invite };
+}
+
+/**
+ * Landing on `/?invite=<token>` turns the token into a cookie that lasts as
+ * long as the invite. The page itself is public either way — Demo Mode is
+ * the whole editor, just without a key behind it.
+ */
+function applyInviteCookie(req, res, url) {
+  if (!CONFIG.inviteOnly) return;
+  const { token, source } = tokenFromRequest(req, url);
+  if (!token) return;
+  const invite = CONFIG.inviteStore.lookup(token);
+  if (invite) {
+    if (source === "query") res.setHeader("Set-Cookie", inviteCookie(invite, req));
+  } else if (source === "query") {
+    // A dead link should not leave a stale cookie behind either.
+    res.setHeader("Set-Cookie", clearInviteCookie());
+  }
+}
+
+function isTruthy(value) {
+  const v = String(value ?? "").trim().toLowerCase();
+  return v !== "" && v !== "0" && v !== "false" && v !== "no" && v !== "off";
+}
+
 // ---------------------------------------------------------------------------
 // Static files
 // ---------------------------------------------------------------------------
@@ -336,6 +427,7 @@ function noKey(res) {
 async function serveStatic(req, res, url) {
   let rel = decodeURIComponent(url.pathname);
   if (rel === "/" || rel === "") rel = "/index.html";
+  if (rel === "/index.html") applyInviteCookie(req, res, url);
 
   const target = path.join(PUBLIC_DIR, path.normalize(rel));
   if (!target.startsWith(PUBLIC_DIR + path.sep) && target !== PUBLIC_DIR) {

@@ -22,3 +22,9 @@ tmp/
 
 # local backup archive
 speakdown_*.tar.gz
+
+# Invite tokens for a hosted instance (server/invite.js)
+invites.json
+
+# Hackathon form answers — contact details, live links
+docs/submission.md

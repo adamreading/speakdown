@@ -10,6 +10,7 @@ said disappears. No keyboard, no toolbar, no mouse.
 ![Speakdown](docs/screenshot.png)
 
 Built for AssemblyAI's Voice Hackathon Week, September 2026.
+**Demo video:** <https://www.loom.com/share/fbd68c400d7c44d5bddbf64c3387c301>
 
 ---
 
@@ -38,8 +39,27 @@ node server/index.js
 normally — no HTTPS or tunnel needed.
 
 ```bash
-npm test                 # 140 tests, no dependencies, ~1s
+npm test                 # 156 tests, no dependencies, ~1s
 ```
+
+### Hosting it for other people
+
+A shared instance is a shared API key, and every utterance spends credit. So
+a hosted copy can be switched to **invite-only**: set `SPEAKDOWN_INVITE_ONLY=1`
+in `.env`, restart, and mint a link that dies on its own:
+
+```bash
+node server/invite.js create --hours 72 --label "hackathon judges"
+# → https://your-host/speakdown/?invite=<token>
+```
+
+Opening that link once sets an `HttpOnly` cookie that lasts exactly as long as
+the invite. Anyone without one still gets the whole editor in Demo Mode, and the
+dictation routes refuse with a clear 403. Expired invites are pruned from
+`invites.json` automatically; `node server/invite.js list | revoke <token> | clear`
+manage them by hand. `SPEAKDOWN_MAX_LIVE_SESSIONS` (default 6) caps simultaneous
+upstream requests. The server is happy behind a path prefix such as
+`/speakdown/` — every asset and API reference is relative.
 
 ---
 
@@ -114,6 +134,8 @@ LLM, `llm_response` is the rewrite. Speakdown keeps **every** transcript and the
 through the same deterministic pipeline — so switching views is an exact
 reconstruction, not an edit applied after the fact. The Activity panel word-diffs
 the two and shows you exactly what the rewrite removed.
+
+![The Activity panel: per-utterance wait, streamed chunks, STT and rewrite timings](docs/screenshot-activity.png)
 
 Rewrites are best-effort. A `null` `llm_response` with a non-null `llm_error`
 is still a successful transcription, so Speakdown falls back to `text` and says
@@ -313,6 +335,7 @@ energy-based voice activity detection, not of the API.
 server/
   index.js              HTTP server, static files, streaming session bridge
   dictation-api.js      The Dictation API client — multipart assembly, errors
+  invite.js             Expiring invite links for a hosted instance (+ CLI)
 public/
   index.html            The editor shell
   css/app.css           All styling
@@ -327,7 +350,7 @@ public/
     doc.js              Block document model, undo, markdown serialisation
     text.js             Filler removal, fragment joining, emphasis wrapping
     markdown.js         Markdown renderer and source highlighter
-test/                   140 tests across all of the above
+test/                   156 tests across all of the above
 ```
 
 The pipeline lives apart from `app.js` deliberately: it holds all the interesting
