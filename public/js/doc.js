@@ -88,6 +88,50 @@ export class SpeakdownDoc {
   }
 
   /**
+   * Where the next dictated words will land, for drawing a caret.
+   *
+   *   newLine  — the caret sits on a line of its own (the current block is
+   *              still empty, or a soft break is pending) rather than at the
+   *              end of the last rendered line
+   *   prefix   — the markdown the new line will start with ("- ", "## ", "3. ",
+   *              continuation indent after "new line"), so the ghost line reads
+   *              like the markdown that is about to appear
+   *   gap      — a blank line separates it from the previous block
+   */
+  cursor() {
+    const cur = this.current;
+    const prev = this.blocks[this.blocks.length - 2];
+    const text = cur.text.replace(/\s+$/, "");
+    const pendingBreak = /\n$/.test(cur.text) && text.length > 0;
+
+    // A finished heading or a rule never takes more words: the next utterance
+    // opens a fresh paragraph below it (see appendText).
+    if ((HEADING_TYPES.has(cur.type) && text) || cur.type === "hr") {
+      return { newLine: true, prefix: "", gap: true };
+    }
+    if (text && !pendingBreak) return { newLine: false, prefix: "", gap: false };
+
+    let prefix = BLOCK_PREFIX[cur.type] ?? "";
+    if (cur.type === "ol") {
+      let n = 1;
+      for (let i = this.blocks.length - 2; i >= 0 && this.blocks[i].type === "ol"; i--) n++;
+      prefix = `${n}. `;
+    }
+    if (cur.type === "code" || cur.type === "hr") prefix = "";
+
+    if (pendingBreak) {
+      // Continuation line inside the same block: list items indent to the
+      // content column, quotes repeat their marker, paragraphs start flush.
+      const cont = cur.type === "quote" ? "> " : LIST_TYPES.has(cur.type) ? " ".repeat(prefix.length) : "";
+      return { newLine: true, prefix: cont, gap: false };
+    }
+
+    const prevHasText = Boolean(prev && (prev.text.trim() || prev.type === "hr" || prev.type === "code"));
+    const sameList = prev && LIST_TYPES.has(cur.type) && prev.type === cur.type;
+    return { newLine: true, prefix, gap: prevHasText && !sameList };
+  }
+
+  /**
    * Apply a block type. If the current block is still empty we retype it in
    * place; otherwise we open a new block. This is what makes "heading two"
    * followed by the heading text behave the way people expect, while

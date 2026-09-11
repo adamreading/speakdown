@@ -52,6 +52,13 @@ const state = {
 
   /** Every API response, in spoken order. The toggle replays these. */
   transcripts: [],
+  /**
+   * Markdown the document is rebuilt on top of. Null until the source is edited
+   * by hand; after that, the hand-edited text is the floor and only transcripts
+   * spoken since are replayed over it, so the Cleaned/Verbatim toggle switches
+   * views instead of wiping the page.
+   */
+  baseMarkdown: null,
   textSource: "cleaned", // 'cleaned' | 'verbatim'
 
   settings: {
@@ -120,7 +127,7 @@ function cacheElements() {
     "uploadMode", "captureMode", "fillerLevel", "llmInstruction",
     "togglePunctuation", "toggleHeatmap", "toggleAutoscroll", "btnEditSource",
     "metaEndpoint", "metaAudio", "metaKeyterms", "metaLlm",
-    "btnMic", "btnDemo", "meter", "status", "statusHint",
+    "btnMic", "btnDemo", "meter", "status", "statusHint", "btnLlmHelp", "llmHelp", "llmHelpClose", "llmHelpLimit",
     "statWait", "statMedian", "statStreamed", "statWords", "statCommands",
     "toasts",
   ];
@@ -246,6 +253,14 @@ function bindEvents() {
   el.btnRail.addEventListener("click", toggleRail);
   el.bannerClose.addEventListener("click", () => (el.banner.hidden = true));
   el.btnEditSource.addEventListener("click", toggleSourceEditing);
+  el.btnLlmHelp.addEventListener("click", () => {
+    el.llmHelpLimit.textContent = String(state.config?.limits?.maxLlmInstructionChars || 1000);
+    el.llmHelp.showModal();
+  });
+  el.llmHelpClose.addEventListener("click", () => el.llmHelp.close());
+  el.llmHelp.addEventListener("click", (e) => {
+    if (e.target === el.llmHelp) el.llmHelp.close(); // backdrop click
+  });
 
   for (const seg of el.segButtons) {
     seg.addEventListener("click", () => setTextSource(seg.dataset.source));
@@ -386,8 +401,10 @@ function textFor(result) {
  */
 function rebuildDocument() {
   const confidence = state.doc.confidence;
-  state.doc = new SpeakdownDoc();
+  const stats = state.doc.stats;
+  state.doc = state.baseMarkdown ? SpeakdownDoc.fromMarkdown(state.baseMarkdown) : new SpeakdownDoc();
   state.doc.confidence = confidence;
+  if (state.baseMarkdown) state.doc.stats = stats;
 
   for (const result of state.transcripts) {
     applyTranscript(state.doc, textFor(result), {
@@ -593,6 +610,7 @@ function updateStatus() {
 function setStatus(text, cls = "") {
   el.status.textContent = text;
   el.status.className = `status ${cls}`.trim();
+  el.app.classList.toggle("is-listening", state.running || state.demoRunning);
 }
 
 // ---------------------------------------------------------------------------
@@ -661,8 +679,9 @@ function render() {
   const lowConfidence = new Set(state.doc.lowConfidenceTerms(0.75).map((e) => e.word));
 
   if (!state.editingSource) {
-    el.source.innerHTML = highlightSource(markdown, lowConfidence);
+    el.source.innerHTML = withCaret(highlightSource(markdown, lowConfidence), markdown);
   }
+  el.app.classList.toggle("is-listening", state.running || state.demoRunning);
   el.preview.innerHTML = renderMarkdown(markdown);
   el.emptyState.hidden = !state.doc.isEmpty();
 
@@ -678,6 +697,26 @@ function render() {
       }
     });
   }
+}
+
+/**
+ * Draw the insertion point into the highlighted source: a caret at the end of
+ * the last line while a block is still taking words, or on a ghost line of its
+ * own — carrying the markdown prefix the next words will get — after a block
+ * command like "bullet list" or "new line" that has not yet been spoken into.
+ */
+function withCaret(html, markdown) {
+  const cur = state.doc.cursor();
+  const ghost = cur.prefix ? `<span class="src-syntax src-ghost">${escapeHtml(cur.prefix)}</span>` : "";
+  const caret = `${ghost}<span class="src-caret" aria-hidden="true"></span>`;
+  const line = `<span class="src-line src-cursor-line">${caret}</span>`;
+
+  if (state.doc.isEmpty()) return line;
+
+  const blank = '<span class="src-line"> </span>';
+  if (html.endsWith(blank)) html = html.slice(0, -blank.length); // toMarkdown's trailing newline
+  if (!cur.newLine) return html.replace(/<\/span>$/, `${caret}</span>`);
+  return html + (cur.gap ? blank : "") + line;
 }
 
 function recordTimings(result) {
@@ -995,6 +1034,7 @@ function downloadMarkdown() {
 function resetSession() {
   state.doc = new SpeakdownDoc();
   state.transcripts = [];
+  state.baseMarkdown = null;
   state.waits = [];
   state.streamedBytes = 0;
   state.seq = 0;
@@ -1028,11 +1068,13 @@ function toggleSourceEditing() {
     el.sourceEdit.focus();
   } else {
     // A hand edit becomes the document. The transcript log no longer describes
-    // it, so it is dropped rather than left to silently revert the edit on the
-    // next Cleaned/Verbatim toggle.
+    // it, so the edited markdown becomes the base that later transcripts are
+    // replayed on top of — the Cleaned/Verbatim toggle keeps working for
+    // everything said from here on, and never reverts the edit.
     const confidence = state.doc.confidence;
     const stats = state.doc.stats;
-    state.doc = SpeakdownDoc.fromMarkdown(el.sourceEdit.value);
+    state.baseMarkdown = el.sourceEdit.value;
+    state.doc = SpeakdownDoc.fromMarkdown(state.baseMarkdown);
     state.doc.confidence = confidence;
     state.doc.stats = stats;
     state.transcripts = [];

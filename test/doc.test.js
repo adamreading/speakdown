@@ -254,3 +254,58 @@ test("clear resets to a single empty block", () => {
   doc.clear();
   assert.ok(doc.isEmpty());
 });
+
+// ---------------------------------------------------------------------------
+// Cursor — where the next words land
+// ---------------------------------------------------------------------------
+
+test("cursor sits at the end of a block that is taking words", () => {
+  const doc = new SpeakdownDoc();
+  doc.appendText("Hello there");
+  assert.deepEqual(doc.cursor(), { newLine: false, prefix: "", gap: false });
+});
+
+test("cursor moves to a ghost line with the block prefix after a block command", () => {
+  const doc = new SpeakdownDoc();
+  doc.appendText("Intro paragraph");
+  doc.setBlockType("ul");
+  assert.deepEqual(doc.cursor(), { newLine: true, prefix: "- ", gap: true });
+  doc.appendText("first item");
+  doc.setBlockType("ul");
+  assert.deepEqual(doc.cursor(), { newLine: true, prefix: "- ", gap: false }, "no blank line inside a list");
+});
+
+test("cursor numbers the next ordered item", () => {
+  const doc = new SpeakdownDoc();
+  doc.setBlockType("ol");
+  doc.appendText("one");
+  doc.setBlockType("ol");
+  doc.appendText("two");
+  doc.setBlockType("ol");
+  assert.equal(doc.cursor().prefix, "3. ");
+});
+
+test("cursor indents a continuation line after a soft break", () => {
+  const doc = new SpeakdownDoc();
+  doc.setBlockType("ul");
+  doc.appendText("first line");
+  doc.softBreak();
+  assert.deepEqual(doc.cursor(), { newLine: true, prefix: "  ", gap: false });
+  const quote = new SpeakdownDoc();
+  quote.setBlockType("quote");
+  quote.appendText("said");
+  quote.softBreak();
+  assert.equal(quote.cursor().prefix, "> ");
+});
+
+test("cursor drops below a finished heading, where the next paragraph will go", () => {
+  const doc = new SpeakdownDoc();
+  doc.setBlockType("h2");
+  assert.deepEqual(doc.cursor(), { newLine: true, prefix: "## ", gap: false }, "empty heading: ghost prefix");
+  doc.appendText("What this is");
+  assert.deepEqual(doc.cursor(), { newLine: true, prefix: "", gap: true }, "filled heading: new paragraph below");
+});
+
+test("an empty document has a bare cursor line", () => {
+  assert.deepEqual(new SpeakdownDoc().cursor(), { newLine: true, prefix: "", gap: false });
+});

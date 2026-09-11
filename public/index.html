@@ -189,12 +189,20 @@
             <div class="setting">
               <label class="toggle">
                 <input type="checkbox" id="toggleAutoscroll" checked />
-                <span>Follow the cursor</span>
+                <span>Keep the cursor in view</span>
               </label>
+              <p class="setting-hint">
+                Scrolls both panes to the newest text after each utterance, so
+                the caret is always on screen while you dictate. Turn off to
+                read back earlier parts while still talking.
+              </p>
             </div>
 
             <div class="setting">
-              <label class="setting-label" for="llmInstruction">llm_instruction (advanced)</label>
+              <div class="setting-label-row">
+                <label class="setting-label" for="llmInstruction">llm_instruction (advanced)</label>
+                <button class="btn btn-tiny" id="btnLlmHelp" type="button" title="What this field does">What is this?</button>
+              </div>
               <textarea
                 id="llmInstruction"
                 rows="3"
@@ -222,6 +230,57 @@
           </div>
         </aside>
       </main>
+
+      <!-- ─── llm_instruction help ───────────────────────────────── -->
+      <dialog class="help" id="llmHelp" aria-labelledby="llmHelpTitle">
+        <div class="help-body">
+          <h2 id="llmHelpTitle">What <code>llm_instruction</code> does</h2>
+          <p>
+            Every clip you dictate goes through two steps on AssemblyAI's side. Speech-to-text
+            produces <code>text</code>, the words exactly as you said them. Then a language model
+            rewrites that into <code>llm_response</code>. This field is the brief for that second step.
+          </p>
+          <h3>Leave it empty (the default)</h3>
+          <p>
+            The field is omitted from the request and AssemblyAI runs its built-in cleanup: it
+            removes “um”, “uh”, false starts and repeated words, and leaves every other word in
+            the order you said it. That is exactly what a dictation editor wants, so Speakdown
+            shows <code>llm_response</code> in the Cleaned view and keeps <code>text</code> for
+            Verbatim.
+          </p>
+          <h3>Type something and it replaces that task</h3>
+          <p>
+            Your instruction does not add to the cleanup, it swaps it out. Describe the
+            transformation and nothing else, for example:
+          </p>
+          <ul>
+            <li>“Fix grammar and punctuation. Keep every word in the same order.”</li>
+            <li>“Rewrite as formal business English.”</li>
+            <li>“Translate into French.”</li>
+            <li>“Turn this into a concise bullet-point summary.”</li>
+          </ul>
+          <h3>Things to know</h3>
+          <ul>
+            <li>
+              Formatting commands (“heading two”, “scratch that”) are parsed from the rewritten
+              text. An instruction that rephrases or translates can swallow them. If commands stop
+              firing, switch the Markdown pane to <strong>Verbatim</strong>.
+            </li>
+            <li>
+              Longer or harder instructions add rewrite time, which you can see as the
+              <em>rewrite</em> figure on each entry in the Activity tab.
+            </li>
+            <li>
+              The verbatim <code>text</code> is never affected, and the Activity diff still
+              shows exactly what the rewrite changed.
+            </li>
+            <li>Maximum length: <span id="llmHelpLimit">1000</span> characters.</li>
+          </ul>
+          <div class="help-actions">
+            <button class="btn" id="llmHelpClose" type="button">Got it</button>
+          </div>
+        </div>
+      </dialog>
 
       <!-- ─── Dock ───────────────────────────────────────────────── -->
       <footer class="dock">
